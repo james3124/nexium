@@ -1,0 +1,45 @@
+[package]
+name = "nexium"
+version = "0.2.2"
+edition = "2024"
+description = "NEXIUM - an independent, Rust-powered headless browser engine"
+license = "AGPL-3.0-or-later"
+
+[lib]
+name = "nexium"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexium"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.23.1"
+brotli = "9.1.1"
+bytes = "1.12.1"
+encoding_rs = "0.8.35"
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+fontdue = "0.9.5"
+http-body-util = "0.1.5"
+httpdate = "1.0.3"
+hyper = { version = "1.12.0", features = ["http1", "http2", "client", "server"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["ring", "http1", "http2", "webpki-roots", "tls12", "logging"] }
+hyper-util = { version = "0.1.21", features = ["client", "client-legacy", "http1", "http2", "tokio", "server", "service"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync"] }
+toml = "0.9.8"
+tower-service = "0.3.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+url = "2.5.8"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+lto = "thin"

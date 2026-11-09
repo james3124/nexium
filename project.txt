@@ -1,0 +1,1255 @@
+PROJECT NEXIUM
+
+Independent Rust-Powered Headless Browser Engine
+
+1. PROJECT VISION
+
+Build NEXIUM, an independent, high-performance browser engine written primarily in Rust.
+
+NEXIUM is designed to operate as a headless browser while providing the capabilities and behavior of a traditional headful desktop browser.
+
+Unlike conventional headless browser solutions, NEXIUM must not depend on Chromium, Google Chrome, Firefox, WebKit, Playwright, Puppeteer, or other existing complete browser engines.
+
+We are developing our own browser infrastructure, including:
+
+- HTML parsing engine.
+- DOM engine.
+- CSS parsing and styling engine.
+- Layout engine.
+- Rendering engine.
+- JavaScript execution environment.
+- Networking engine.
+- Browser storage system.
+- Browser interaction engine.
+- Navigation and tab management.
+- Visual perception system.
+- AI agent integration.
+
+The browser must operate without opening an actual graphical browser window.
+
+AI agents should be able to interact with websites as if they were operating a normal desktop browser.
+
+The primary objective is to create an independent browser infrastructure that can be controlled by AI agents and external applications.
+
+---
+
+2. STRICT TECHNOLOGY REQUIREMENTS
+
+Primary Programming Language
+
+Rust must be the primary programming language for NEXIUM.
+
+Use Rust for:
+
+- Browser engine.
+- HTML and CSS processing.
+- DOM management.
+- Layout calculations.
+- Rendering.
+- Browser management.
+- Networking.
+- Storage.
+- Interaction handling.
+- API.
+- MCP integration.
+- Security.
+- Process management.
+
+Strict Restrictions
+
+Do not use:
+
+- Chromium.
+- Google Chrome.
+- Firefox.
+- WebKit.
+- Blink.
+- Gecko.
+- Playwright.
+- Puppeteer.
+- Selenium.
+- Existing complete browser engines.
+- Existing browser automation frameworks as the foundation.
+
+Do not simply wrap another browser engine and call it NEXIUM.
+
+We must own and control the core browser implementation.
+
+Permitted Supporting Libraries
+
+Supporting Rust libraries are permitted when they provide individual functionalities rather than an entire browser engine.
+
+Potential libraries:
+
+Component| Technology
+Programming language| Rust
+Async runtime| Tokio
+HTTP server| Axum
+Serialization| Serde
+JavaScript runtime| Boa or another embeddable JS engine
+TLS| Rustls
+HTTP networking| Hyper
+URL parsing| url crate
+Image processing| image crate
+Text processing| Rust-native libraries
+Logging| Tracing
+Configuration| TOML
+File operations| Tokio FS
+MCP integration| Rust MCP SDK
+
+Verify library compatibility and maintenance before selecting dependencies.
+
+---
+
+3. BROWSER ENGINE
+
+Develop an independent browser engine with separate internal components.
+
+3.1 HTML Engine
+
+Implement:
+
+- HTML parsing.
+- HTML tokenization.
+- DOM construction.
+- DOM manipulation.
+- HTML5 document structure.
+- Element creation.
+- Element removal.
+- Attribute management.
+- Text nodes.
+- Comments.
+- Document fragments.
+- Document lifecycle.
+- Mutation handling.
+- Form elements.
+- Semantic HTML elements.
+
+The parser should recover from malformed HTML according to HTML parsing standards.
+
+3.2 DOM Engine
+
+Develop an independent Document Object Model.
+
+Implement:
+
+- Document.
+- Element.
+- Node.
+- Text.
+- DocumentFragment.
+- Attributes.
+- Parent-child relationships.
+- Element traversal.
+- Query selectors.
+- Event listeners.
+- DOM mutation.
+- DOM serialization.
+- DOM inspection.
+
+Support common browser DOM APIs progressively.
+
+The DOM must communicate with the JavaScript execution environment.
+
+3.3 CSS Engine
+
+Develop an independent CSS processing system.
+
+Implement:
+
+- CSS tokenization.
+- CSS parsing.
+- Selectors.
+- Specificity.
+- Cascade.
+- Inheritance.
+- Computed styles.
+- CSS variables.
+- Box model.
+- Margins.
+- Padding.
+- Borders.
+- Colors.
+- Backgrounds.
+- Typography.
+- Positioning.
+- Display properties.
+- Overflow.
+- Media queries.
+- Responsive layouts.
+- CSS transitions.
+- CSS animations.
+
+Progressively implement:
+
+- Flexbox.
+- CSS Grid.
+- Absolute positioning.
+- Fixed positioning.
+- Sticky positioning.
+- Transforms.
+- Pseudo-classes.
+- Pseudo-elements.
+
+Maintain a standards-oriented implementation.
+
+---
+
+4. LAYOUT AND RENDERING ENGINE
+
+Create an independent rendering pipeline.
+
+The browser must calculate page layouts and render graphical content without requiring a physical display or visible browser window.
+
+Layout Engine
+
+Implement:
+
+- Layout tree generation.
+- Block formatting.
+- Inline formatting.
+- Flexbox layout.
+- Grid layout.
+- Position calculations.
+- Text measurement.
+- Viewport calculations.
+- Scrolling.
+- Responsive layout.
+- Element dimensions.
+- Element coordinates.
+
+Rendering Engine
+
+Implement:
+
+- Paint operations.
+- Display lists.
+- Text rendering.
+- Image rendering.
+- SVG rendering.
+- Canvas rendering.
+- Background rendering.
+- Borders.
+- Shadows.
+- Clipping.
+- Compositing.
+- Layer management.
+- Transparency.
+- Animations.
+
+Graphics Output
+
+Support:
+
+- Full-page screenshots.
+- Viewport screenshots.
+- Element screenshots.
+- PNG output.
+- JPEG output.
+- Screenshot resizing.
+- Screenshot comparison.
+- Image buffers.
+- Pixel coordinate detection.
+
+The rendering pipeline must work independently of a desktop window manager.
+
+Use appropriate Rust graphics libraries where necessary, without embedding an existing browser rendering engine.
+
+---
+
+5. JAVASCRIPT EXECUTION ENGINE
+
+NEXIUM must execute JavaScript used by modern websites.
+
+An embeddable JavaScript runtime such as Boa may be used.
+
+However, the browser must independently implement the browser APIs and DOM bindings required to make JavaScript work with webpages.
+
+JavaScript Requirements
+
+Implement:
+
+- ECMAScript execution.
+- Variables and functions.
+- Objects and arrays.
+- Classes.
+- Modules.
+- Promises.
+- Async/await.
+- Timers.
+- Exception handling.
+- Event loops.
+- Microtasks.
+- Task scheduling.
+- JavaScript-to-Rust communication.
+
+Browser APIs
+
+Progressively implement:
+
+- Window.
+- Document.
+- Navigator.
+- Location.
+- History.
+- Screen.
+- Performance.
+- Console.
+- Fetch.
+- XMLHttpRequest.
+- URL.
+- URLSearchParams.
+- Blob.
+- File.
+- FormData.
+- TextEncoder.
+- TextDecoder.
+- MutationObserver.
+- IntersectionObserver.
+- ResizeObserver.
+- requestAnimationFrame.
+- Web Workers.
+
+JavaScript and DOM Integration
+
+JavaScript must be able to:
+
+- Read HTML elements.
+- Modify webpage content.
+- Change CSS properties.
+- Create elements.
+- Remove elements.
+- Handle events.
+- Submit forms.
+- Make network requests.
+- Respond to user interactions.
+
+Do not claim complete JavaScript or Web API compatibility until it has been tested.
+
+---
+
+6. NETWORKING ENGINE
+
+Develop an independent networking subsystem using Rust.
+
+Protocol Support
+
+Implement:
+
+- HTTP/1.1.
+- HTTP/2.
+- HTTPS.
+- TLS.
+- DNS resolution.
+- TCP connections.
+- Connection pooling.
+- WebSockets.
+- HTTP redirects.
+- Compression.
+- Request cancellation.
+- Timeout management.
+
+Plan HTTP/3 support as a later development milestone.
+
+Networking Features
+
+Implement:
+
+- GET requests.
+- POST requests.
+- PUT requests.
+- PATCH requests.
+- DELETE requests.
+- Custom request headers.
+- Response headers.
+- Request bodies.
+- Response bodies.
+- Cookies.
+- Redirect handling.
+- File downloads.
+- Uploads.
+- Proxy configuration.
+- Request interception.
+- Response inspection.
+- Network monitoring.
+- Failed request detection.
+
+Resource Loading
+
+Support loading:
+
+- HTML.
+- CSS.
+- JavaScript.
+- Images.
+- Fonts.
+- SVG.
+- Audio.
+- Video.
+- Other supported web resources.
+
+Implement resource prioritization and asynchronous loading.
+
+---
+
+7. HEADLESS EXECUTION SYSTEM
+
+This is one of the most important parts of NEXIUM.
+
+The browser must operate without opening a visible browser window.
+
+Do not depend on Xvfb or another virtual desktop as the primary rendering architecture.
+
+Instead, implement an internal rendering pipeline.
+
+Required Capabilities
+
+- Load webpages.
+- Execute JavaScript.
+- Calculate layouts.
+- Render webpages.
+- Process mouse interactions.
+- Process keyboard interactions.
+- Generate screenshots.
+- Maintain browser sessions.
+- Manage multiple tabs.
+- Process animations.
+- Handle scrolling.
+- Return visual information to AI agents.
+
+Operating Modes
+
+Implement two modes.
+
+Mode A: Headless
+
+The browser operates completely in the background.
+
+No visible browser window is created.
+
+Mode B: Remote Visualization
+
+Allow external applications to receive rendered screenshots or streamed frames.
+
+This does not require opening a browser window on the host machine.
+
+The visualization system should be optional and separate from the browser engine.
+
+---
+
+8. AI AGENT INTERACTION ENGINE
+
+NEXIUM must provide a complete interaction system for AI agents.
+
+Agents should be able to operate webpages using structured commands.
+
+8.1 Mouse Interaction
+
+Implement:
+
+- Click.
+- Double-click.
+- Right-click.
+- Hover.
+- Mouse movement.
+- Drag and drop.
+- Vertical scrolling.
+- Horizontal scrolling.
+- Coordinate-based clicking.
+- Mouse button states.
+
+8.2 Keyboard Interaction
+
+Implement:
+
+- Text typing.
+- Individual key presses.
+- Keyboard combinations.
+- Keyboard shortcuts.
+- Copy.
+- Paste.
+- Select all.
+- Text selection.
+- Tab navigation.
+- Enter and Escape handling.
+
+8.3 Navigation
+
+Implement:
+
+- Open URL.
+- Navigate backward.
+- Navigate forward.
+- Reload.
+- Stop loading.
+- Open new tab.
+- Close tab.
+- Switch tabs.
+- Manage multiple pages.
+- Track navigation history.
+
+8.4 Page Interaction
+
+Implement:
+
+- Find elements.
+- Click buttons.
+- Identify links.
+- Fill input fields.
+- Submit forms.
+- Select dropdown options.
+- Check checkboxes.
+- Toggle switches.
+- Upload files.
+- Download files.
+- Handle dialogs.
+- Detect loading states.
+- Wait for elements.
+
+The interaction engine should support both DOM-based and coordinate-based interaction.
+
+---
+
+9. VISUAL PERCEPTION SYSTEM
+
+AI agents must be able to understand webpages visually.
+
+Implement a visual perception subsystem.
+
+Screenshot Capabilities
+
+- Full-page screenshot.
+- Viewport screenshot.
+- Element screenshot.
+- Screenshot in PNG format.
+- Screenshot in JPEG format.
+- Image resizing.
+- Screenshot comparison.
+
+Element Recognition
+
+Provide:
+
+- Element coordinates.
+- Bounding boxes.
+- Element dimensions.
+- Visibility information.
+- Clickability information.
+- Text content.
+- Element hierarchy.
+- Scroll position.
+- Viewport dimensions.
+
+Accessibility
+
+Implement an accessibility tree.
+
+Support:
+
+- Accessible names.
+- Roles.
+- Labels.
+- Descriptions.
+- Interactive states.
+- Keyboard accessibility.
+
+AI-Friendly Page Information
+
+Provide structured page information instead of forcing AI agents to process entire HTML documents.
+
+Example:
+
+{
+  "url": "https://example.com",
+  "title": "Example Website",
+  "viewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "elements": [
+    {
+      "type": "button",
+      "text": "Sign In",
+      "visible": true,
+      "clickable": true,
+      "bounds": {
+        "x": 100,
+        "y": 200,
+        "width": 120,
+        "height": 40
+      }
+    }
+  ]
+}
+
+---
+
+10. BROWSER STORAGE SYSTEM
+
+NEXIUM must implement its own independent storage infrastructure.
+
+STRICT REQUIREMENT
+
+Do not use SQLite, PostgreSQL, MySQL, MongoDB, or any traditional external database.
+
+Use Rust filesystem operations and custom storage management.
+
+Storage Components
+
+Implement:
+
+1. Cookie storage.
+2. Browser cache.
+3. Browser profiles.
+4. Session storage.
+5. Local storage.
+6. IndexedDB.
+7. Browser history.
+8. Bookmarks.
+9. Downloads.
+10. Browser preferences.
+11. Website permissions.
+12. Authentication sessions.
+
+Storage Architecture
+
+Suggested structure:
+
+nexium-data/
+│
+├── profiles/
+│   ├── default/
+│   │   ├── cookies/
+│   │   ├── storage/
+│   │   │   ├── local/
+│   │   │   ├── session/
+│   │   │   └── indexeddb/
+│   │   ├── cache/
+│   │   ├── sessions/
+│   │   └── preferences.json
+│   │
+│   └── agent-001/
+│
+├── history/
+├── bookmarks/
+├── downloads/
+├── temporary/
+└── configuration/
+    └── browser.json
+
+Storage Requirements
+
+- Use JSON for simple configuration and metadata.
+- Use binary files for cached resources.
+- Implement efficient file indexing.
+- Use asynchronous file operations.
+- Implement atomic writes.
+- Prevent data corruption.
+- Implement storage cleanup.
+- Support cache expiration.
+- Implement profile isolation.
+- Implement file locking where necessary.
+- Support backup and restoration.
+- Encrypt sensitive session information where appropriate.
+
+Do not store every type of data in JSON.
+
+Implement a custom storage abstraction that allows future storage improvements without modifying the browser engine.
+
+The browser must remain functional when persistent storage is disabled.
+
+---
+
+11. LOGIN AND AUTHENTICATION
+
+Allow AI agents to interact with authorized login pages.
+
+Implement:
+
+- Login form detection.
+- Username and password fields.
+- Form submission.
+- Cookie persistence.
+- Session restoration.
+- Authentication state detection.
+- Session expiration detection.
+- Multiple account profiles.
+- Secure credential handling.
+
+Do not attempt to bypass CAPTCHA, MFA, authentication challenges, or website access restrictions.
+
+Allow users to complete required authentication challenges through an authorized workflow.
+
+Never expose stored passwords or session tokens through ordinary browser inspection APIs.
+
+---
+
+12. BROWSER INTELLIGENCE
+
+Create an intelligence layer that helps AI agents understand webpages.
+
+Implement:
+
+- DOM snapshots.
+- Accessibility tree extraction.
+- Interactive element detection.
+- Semantic element identification.
+- Text extraction.
+- Form detection.
+- Link detection.
+- Button detection.
+- Page structure analysis.
+- Element visibility.
+- Element bounding boxes.
+- Page state tracking.
+- Loading state detection.
+- Error detection.
+
+The intelligence layer should provide compact, structured results.
+
+Avoid returning unnecessary HTML and oversized page data.
+
+---
+
+13. BROWSER MANAGEMENT SYSTEM
+
+Implement a centralized browser manager.
+
+Responsibilities:
+
+- Create browser instances.
+- Close browser instances.
+- Manage browser processes.
+- Manage tabs.
+- Manage browser contexts.
+- Manage profiles.
+- Manage sessions.
+- Monitor resource consumption.
+- Detect crashes.
+- Recover failed operations.
+- Manage concurrent tasks.
+- Enforce resource limits.
+- Clean temporary resources.
+
+Each AI agent must be able to operate an isolated browser session.
+
+One agent must not be able to access another agent's private session without permission.
+
+---
+
+14. API AND EXTERNAL CONTROL
+
+Create a Rust-powered API using Axum.
+
+REST API
+
+Implement:
+
+POST /browser/create
+POST /browser/close
+GET  /browser/status
+
+POST /browser/navigate
+POST /browser/back
+POST /browser/forward
+POST /browser/reload
+
+POST /browser/click
+POST /browser/type
+POST /browser/press
+POST /browser/scroll
+POST /browser/hover
+
+POST /browser/screenshot
+POST /browser/snapshot
+POST /browser/extract
+POST /browser/evaluate
+
+GET  /browser/tabs
+POST /browser/tabs/create
+POST /browser/tabs/close
+POST /browser/tabs/switch
+
+POST /browser/session/save
+POST /browser/session/restore
+
+GET /browser/network
+GET /browser/console
+
+All endpoints must return structured JSON responses.
+
+WebSocket
+
+Implement WebSocket communication for:
+
+- Real-time browser commands.
+- Browser status.
+- Navigation events.
+- Loading events.
+- Console messages.
+- Network events.
+- Screenshot delivery.
+- Interaction results.
+
+MCP Integration
+
+Build a native Rust MCP server.
+
+Expose tools:
+
+browser_create
+browser_close
+browser_navigate
+browser_click
+browser_type
+browser_press
+browser_scroll
+browser_hover
+browser_screenshot
+browser_snapshot
+browser_extract
+browser_wait
+browser_tabs
+browser_switch_tab
+browser_session_save
+browser_session_restore
+browser_evaluate
+browser_network
+browser_status
+
+Each tool must have:
+
+- Clear descriptions.
+- Validated parameters.
+- Structured responses.
+- Meaningful error messages.
+- Appropriate execution limits.
+
+AI agents must be able to control NEXIUM through MCP without needing access to internal Rust modules.
+
+---
+
+15. SECURITY
+
+Implement security from the beginning.
+
+Requirements:
+
+- Browser context isolation.
+- Profile isolation.
+- API authentication.
+- Permission management.
+- Secure cookie storage.
+- Protected session information.
+- Download restrictions.
+- File access restrictions.
+- Safe JavaScript execution.
+- Network access controls.
+- Request validation.
+- Resource limits.
+- Protection against unauthorized local file access.
+- Protection against server-side request forgery.
+
+Do not expose unrestricted browser control interfaces publicly.
+
+Treat website content as untrusted input.
+
+JavaScript execution must not automatically receive unrestricted access to the host operating system.
+
+---
+
+16. PERFORMANCE OPTIMIZATION
+
+Optimize NEXIUM for AI-driven browsing.
+
+Implement:
+
+- Efficient memory management.
+- Asynchronous networking.
+- Concurrent resource loading.
+- Resource caching.
+- Lazy loading.
+- Efficient DOM updates.
+- Incremental layout calculations.
+- Efficient rendering.
+- Screenshot optimization.
+- Automatic cleanup.
+- Configurable memory limits.
+- Configurable concurrency.
+- Background execution.
+
+Avoid unnecessary allocations and expensive operations.
+
+Use Rust ownership and concurrency features appropriately.
+
+Do not sacrifice browser correctness for performance.
+
+---
+
+17. PROJECT ARCHITECTURE
+
+Use the following proposed modular structure:
+
+nexium/
+│
+├── Cargo.toml
+├── Cargo.lock
+├── README.md
+│
+├── config/
+│   └── default.toml
+│
+├── src/
+│   ├── main.rs
+│   ├── lib.rs
+│   │
+│   ├── engine/
+│   │   ├── mod.rs
+│   │   ├── html/
+│   │   ├── css/
+│   │   ├── dom/
+│   │   ├── javascript/
+│   │   ├── style/
+│   │   ├── layout/
+│   │   ├── paint/
+│   │   └── compositor/
+│   │
+│   ├── networking/
+│   │   ├── mod.rs
+│   │   ├── http/
+│   │   ├── https/
+│   │   ├── dns/
+│   │   ├── websocket/
+│   │   ├── resources/
+│   │   └── cache/
+│   │
+│   ├── browser/
+│   │   ├── mod.rs
+│   │   ├── manager.rs
+│   │   ├── lifecycle.rs
+│   │   ├── navigation.rs
+│   │   ├── tabs.rs
+│   │   ├── contexts.rs
+│   │   └── profiles.rs
+│   │
+│   ├── interaction/
+│   │   ├── mod.rs
+│   │   ├── mouse.rs
+│   │   ├── keyboard.rs
+│   │   ├── events.rs
+│   │   └── actions.rs
+│   │
+│   ├── rendering/
+│   │   ├── mod.rs
+│   │   ├── screenshots.rs
+│   │   ├── viewport.rs
+│   │   ├── images.rs
+│   │   └── visual.rs
+│   │
+│   ├── storage/
+│   │   ├── mod.rs
+│   │   ├── filesystem.rs
+│   │   ├── cookies.rs
+│   │   ├── cache.rs
+│   │   ├── profiles.rs
+│   │   ├── sessions.rs
+│   │   ├── local_storage.rs
+│   │   └── indexeddb.rs
+│   │
+│   ├── intelligence/
+│   │   ├── mod.rs
+│   │   ├── dom.rs
+│   │   ├── accessibility.rs
+│   │   ├── elements.rs
+│   │   └── snapshots.rs
+│   │
+│   ├── api/
+│   │   ├── mod.rs
+│   │   ├── routes.rs
+│   │   ├── handlers.rs
+│   │   └── websocket.rs
+│   │
+│   ├── mcp/
+│   │   ├── mod.rs
+│   │   ├── server.rs
+│   │   └── tools.rs
+│   │
+│   ├── security/
+│   │   ├── mod.rs
+│   │   ├── permissions.rs
+│   │   └── isolation.rs
+│   │
+│   └── utils/
+│       ├── mod.rs
+│       ├── errors.rs
+│       └── logging.rs
+│
+├── tests/
+│   ├── html_tests.rs
+│   ├── css_tests.rs
+│   ├── dom_tests.rs
+│   ├── javascript_tests.rs
+│   ├── networking_tests.rs
+│   └── rendering_tests.rs
+│
+├── examples/
+└── docs/
+
+This is an architectural starting point. Modify the structure when necessary, but maintain modular separation.
+
+---
+
+18. DEVELOPMENT ROADMAP
+
+Do not attempt to build every feature simultaneously.
+
+Develop NEXIUM incrementally.
+
+PHASE 1: FOUNDATION
+
+Build:
+
+- Rust project setup.
+- URL handling.
+- HTTP networking.
+- HTML tokenizer.
+- HTML parser.
+- Basic DOM.
+- Basic document inspection.
+
+Deliverable: Load an HTML webpage and construct its DOM.
+
+PHASE 2: CSS AND LAYOUT
+
+Build:
+
+- CSS tokenizer.
+- CSS parser.
+- Style computation.
+- Box model.
+- Block layout.
+- Inline layout.
+- Text measurement.
+- Basic Flexbox.
+- Basic rendering.
+
+Deliverable: Render basic HTML and CSS webpages into images.
+
+PHASE 3: JAVASCRIPT
+
+Build:
+
+- JavaScript runtime integration.
+- DOM bindings.
+- Event loop.
+- Event listeners.
+- Promises.
+- Async/await.
+- Timers.
+- Fetch API.
+
+Deliverable: Execute JavaScript and allow scripts to modify webpages.
+
+PHASE 4: BROWSER FUNCTIONALITY
+
+Build:
+
+- Navigation.
+- Multiple tabs.
+- Browser history.
+- Cookies.
+- Local storage.
+- Session storage.
+- Cache.
+- Browser profiles.
+- File-based persistence.
+
+Deliverable: Operate as a functional browsing environment.
+
+PHASE 5: VISUAL AND INTERACTION SYSTEM
+
+Build:
+
+- Screenshots.
+- Viewport management.
+- Mouse interactions.
+- Keyboard interactions.
+- Scrolling.
+- Element detection.
+- Accessibility tree.
+- DOM snapshots.
+
+Deliverable: Interact with rendered webpages without a visible browser window.
+
+PHASE 6: AI INTEGRATION
+
+Build:
+
+- REST API.
+- WebSocket.
+- MCP server.
+- Browser tools.
+- Structured responses.
+- Multiple AI agent sessions.
+
+Deliverable: Allow external AI agents to control NEXIUM.
+
+PHASE 7: MODERN WEB COMPATIBILITY
+
+Expand support for:
+
+- CSS Grid.
+- Advanced Flexbox.
+- SVG.
+- Canvas.
+- WebSockets.
+- Web Workers.
+- Modern JavaScript.
+- Advanced browser APIs.
+- Responsive websites.
+- Complex web applications.
+
+Deliverable: Progressively support increasingly complex modern websites.
+
+PHASE 8: OPTIMIZATION AND STABILITY
+
+Implement:
+
+- Performance optimization.
+- Memory management.
+- Crash recovery.
+- Security hardening.
+- Compatibility testing.
+- Resource cleanup.
+- Stress testing.
+- Documentation.
+
+Deliverable: A stable and extensible independent browser engine.
+
+---
+
+19. TESTING AND VALIDATION
+
+Every subsystem must have automated tests.
+
+Test against:
+
+- Simple HTML pages.
+- Complex CSS layouts.
+- JavaScript applications.
+- Dynamic content.
+- Forms.
+- Images.
+- Navigation.
+- Cookies.
+- Authentication sessions.
+- Network failures.
+- Large webpages.
+- Multiple concurrent tabs.
+
+Use relevant web-platform standards tests, including appropriate subsets of Web Platform Tests (WPT).
+
+Track compatibility honestly.
+
+Maintain a test report showing:
+
+- Implemented features.
+- Passing tests.
+- Failing tests.
+- Unsupported features.
+- Known limitations.
+
+Do not claim complete browser compatibility without evidence.
+
+---
+
+20. STRICT DEVELOPMENT INSTRUCTIONS FOR THE AI CODING AGENT
+
+When implementing this project, follow these instructions:
+
+1. Inspect the existing repository before making modifications.
+2. Understand the current project architecture.
+3. Use Rust as the primary implementation language.
+4. Do not replace the independent browser engine with Chromium or another existing engine.
+5. Do not introduce unnecessary database dependencies.
+6. Implement the storage system using filesystem operations.
+7. Use supporting libraries only for individual components.
+8. Write actual working implementations.
+9. Do not create fake functionality.
+10. Do not leave important features as placeholder functions.
+11. Use proper Rust error handling.
+12. Use asynchronous operations where appropriate.
+13. Maintain modular architecture.
+14. Write tests for every major component.
+15. Document implementation decisions.
+16. Compile and test after each major implementation.
+17. Fix compilation errors before moving to the next stage.
+18. Preserve existing working functionality.
+19. Do not claim features are complete when they are not.
+20. Maintain a development roadmap and implementation status.
+
+Implementation Workflow
+
+For every development phase:
+
+1. Inspect existing code.
+2. Identify missing functionality.
+3. Plan the implementation.
+4. Implement the component.
+5. Compile the project.
+6. Run relevant tests.
+7. Fix errors.
+8. Update documentation.
+9. Update the implementation checklist.
+10. Proceed to the next component.
+
+Do not attempt to generate the entire browser engine in one enormous implementation.
+
+Prioritize a working foundation and progressively expand functionality.
+
+---
+
+21. FINAL PROJECT GOAL
+
+NEXIUM must become an independent, Rust-powered browser engine.
+
+It must not require Chromium, Firefox, WebKit, or any other existing complete browser engine.
+
+It must own its:
+
+- HTML engine.
+- DOM engine.
+- CSS engine.
+- Layout engine.
+- Rendering engine.
+- JavaScript integration.
+- Networking engine.
+- Browser storage.
+- Navigation system.
+- Interaction engine.
+- Visual perception.
+- AI integration.
+
+It must operate headlessly without requiring an actual browser window.
+
+AI agents must be able to:
+
+- Navigate websites.
+- Click buttons.
+- Type text.
+- Scroll webpages.
+- Interact with forms.
+- Handle authorized logins.
+- Maintain sessions.
+- Open multiple tabs.
+- Inspect webpage structures.
+- Understand rendered content.
+- Capture screenshots.
+- Access network information.
+- Execute authorized browser operations.
+
+The browser must provide both structured webpage information and visual information to AI agents.
+
+NEXIUM is not a browser automation wrapper. It is our own browser engine and independent browsing infrastructure.
+
+Build it with reliability, performance, security, extensibility, and modern web compatibility as its primary engineering goals.

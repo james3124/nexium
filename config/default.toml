@@ -1,0 +1,33 @@
+# NEXIUM default configuration
+
+# User-Agent sent by the networking engine. Empty means the built-in default.
+user_agent = "Nexium/0.1 (independent Rust headless browser engine)"
+
+# Per-request timeout in milliseconds.
+timeout_ms = 30000
+
+# Maximum number of redirects followed automatically.
+max_redirects = 10
+
+# Maximum buffered response body (32 MiB).
+max_response_bytes = 33554432
+
+# Default headless viewport (used by layout/rendering in later phases).
+viewport_width = 1280
+viewport_height = 720
+
+# Root directory for profiles, cache, cookies and other browser data.
+data_dir = "nexium-data"
+
+# Persistent storage can be disabled; the browser still works in memory.
+storage_enabled = true
+
+# In-memory cookie jar shared by requests and pages.
+cookies_enabled = true
+
+# In-memory HTTP cache for GET responses with freshness metadata.
+cache_enabled = true
+cache_max_entries = 128
+
+# Optional HTTP proxy for outbound requests (HTTP CONNECT tunneling).
+# proxy = "http://127.0.0.1:8080"
