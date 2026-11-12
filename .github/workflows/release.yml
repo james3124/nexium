@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build assets for (e.g. v0.8.0)"
+        required: true
 
 permissions:
   contents: write
@@ -27,7 +32,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin
             arch: x64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             platform: darwin
             arch: arm64
@@ -53,7 +58,7 @@ jobs:
       - name: Package
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
@@ -71,6 +76,7 @@ jobs:
           tar -czf "dist/${asset}" -C dist "${binary}"
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*.tar.gz
 
   npm:
@@ -87,7 +93,7 @@ jobs:
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           if [ -z "${NODE_AUTH_TOKEN}" ]; then
             echo "NPM_TOKEN secret is not configured; skipping publish."
