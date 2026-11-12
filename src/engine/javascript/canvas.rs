@@ -4,7 +4,7 @@
 //! gradient styles, text (`fillText`/`strokeText`/`measureText`) and image
 //! drawing from other canvases (and `data:` URL `<img>` sources).
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -179,11 +179,10 @@ struct GradientRegistry {
 
 thread_local! {
     static GRADIENTS: RefCell<GradientRegistry> = RefCell::new(GradientRegistry { next_id: 1, entries: HashMap::new() });
-    static CANVAS_FONTS: OnceCell<FontSet> = const { OnceCell::new() };
 }
 
 fn with_fonts<R>(f: impl FnOnce(&FontSet) -> R) -> R {
-    CANVAS_FONTS.with(|cell| f(cell.get_or_init(FontSet::embedded)))
+    f(FontSet::embedded())
 }
 
 fn register_gradient(kind: GradientKind) -> Rc<RefCell<Gradient>> {
@@ -482,11 +481,19 @@ impl CanvasState {
         let mut width = 0.0f32;
         let mut actual_ascent = 0.0f32;
         let mut actual_descent = 0.0f32;
+        let mut previous: Option<char> = None;
         for ch in text.chars() {
             if ch == '\t' {
                 width += font.metrics(' ', size).advance_width * 4.0;
+                previous = None;
                 continue;
             }
+            if let Some(prev) = previous
+                && let Some(kern) = font.horizontal_kern(prev, ch, size)
+            {
+                width += kern;
+            }
+            previous = Some(ch);
             let metrics = font.metrics(ch, size);
             width += metrics.advance_width;
             if metrics.height > 0 {
@@ -545,11 +552,19 @@ impl CanvasState {
         let horizontal_scale = (sx / sy).clamp(0.05, 20.0);
         let shear = if self.font.italic { 0.2 } else { 0.0 };
         let mut pen = start;
+        let mut previous: Option<char> = None;
         for ch in text.chars() {
             if ch == '\t' {
                 pen += font.metrics(' ', size).advance_width * 4.0 * horizontal_scale;
+                previous = None;
                 continue;
             }
+            if let Some(prev) = previous
+                && let Some(kern) = font.horizontal_kern(prev, ch, size)
+            {
+                pen += kern * horizontal_scale;
+            }
+            previous = Some(ch);
             let (metrics, bitmap) = font.rasterize(ch, size);
             if ch.is_whitespace() || metrics.width == 0 || metrics.height == 0 {
                 pen += metrics.advance_width * horizontal_scale;
@@ -1206,10 +1221,25 @@ fn image_from_source(value: &JsValue, context: &mut Context) -> Option<RgbaImage
         return Some(image);
     }
     let document = document_rc()?;
-    let document = document.borrow();
-    if document.tag_name(node) == Some("img") {
-        let src = document.get_attribute(node, "src")?;
-        return decode_data_url_image(src);
+    let (tag, src) = {
+        let document = document.borrow();
+        (
+            document.tag_name(node).map(str::to_owned),
+            document.get_attribute(node, "src").map(str::to_owned),
+        )
+    };
+    if tag.as_deref() == Some("img") {
+        let src = src?;
+        if let Some(image) = decode_data_url_image(&src) {
+            return Some(image);
+        }
+        let client = with_state(|state| state.client.clone()).flatten();
+        let base = with_state(|state| state.base_url.clone())?;
+        let url = base.join(&src).ok()?;
+        let bytes = super::fetch::fetch_bytes_sync(url, client).ok()?;
+        return image::load_from_memory(&bytes)
+            .ok()
+            .map(|image| image.to_rgba8());
     }
     None
 }

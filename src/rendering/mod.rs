@@ -126,7 +126,7 @@ pub fn layout_page(page: &Page, viewport: Viewport) -> LayoutResult {
         &page.stylesheets,
         viewport,
     );
-    layout_document(&page.document, &resolver, &fonts, &images, Some(&page.url))
+    layout_document(&page.document, &resolver, fonts, &images, Some(&page.url))
 }
 
 /// Render a loaded page: fetch referenced images, compute styles, lay out and
@@ -152,7 +152,7 @@ pub async fn render_page(
         &page.stylesheets,
         options.viewport,
     );
-    let layout = layout_document(&page.document, &resolver, &fonts, &images, Some(&page.url));
+    let layout = layout_document(&page.document, &resolver, fonts, &images, Some(&page.url));
     debug!("fonts+layout in {:?}", started.elapsed());
 
     let width = options.viewport.width.max(1.0).round() as u32;

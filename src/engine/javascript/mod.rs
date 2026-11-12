@@ -130,6 +130,10 @@ enum SessionCommand {
             SessionSnapshot,
         )>,
     },
+    Layout {
+        rects: HashMap<usize, [f32; 4]>,
+        styles: HashMap<usize, HashMap<String, String>>,
+    },
 }
 
 /// A live JavaScript runtime attached to a loaded page. It keeps event
@@ -171,6 +175,15 @@ impl ScriptSession {
             })
             .ok()?;
         receiver.recv().ok()
+    }
+
+    /// Publish viewport geometry and computed styles for the DOM bindings.
+    pub(crate) fn set_layout(
+        &self,
+        rects: HashMap<usize, [f32; 4]>,
+        styles: HashMap<usize, HashMap<String, String>>,
+    ) {
+        let _ = self.sender.send(SessionCommand::Layout { rects, styles });
     }
 
     pub(crate) fn snapshot(&self) -> Option<SessionSnapshot> {
@@ -230,6 +243,12 @@ impl ScriptSession {
                             }
                             drain_ready(&mut context);
                             let _ = reply.send(session_snapshot(&document, executed, false));
+                        }
+                        SessionCommand::Layout { rects, styles } => {
+                            with_state(|state| {
+                                state.layout_rects = rects;
+                                state.computed_styles = styles;
+                            });
                         }
                         SessionCommand::Snapshot { reply } => {
                             drain_ready(&mut context);
@@ -309,6 +328,8 @@ pub(crate) struct Timer {
 pub(crate) struct JsState {
     pub document: Rc<RefCell<Document>>,
     pub base_url: Url,
+    pub layout_rects: HashMap<usize, [f32; 4]>,
+    pub computed_styles: HashMap<usize, HashMap<String, String>>,
     pub node_cache: Option<JsObject>,
     pub function_store: Option<JsObject>,
     pub next_function_slot: u32,
@@ -741,6 +762,8 @@ fn initialize_runtime(
     let state = JsState {
         document: Rc::clone(&document_rc),
         base_url: base_url.clone(),
+        layout_rects: HashMap::new(),
+        computed_styles: HashMap::new(),
         node_cache: None,
         function_store: None,
         next_function_slot: 0,
@@ -1238,6 +1261,8 @@ fn install_globals(context: &mut Context, base_url: &Url, options: &ScriptOption
     context.register_global_callable(JsString::from("confirm"), 1, confirm)?;
     let prompt = NativeFunction::from_fn_ptr(js_prompt);
     context.register_global_callable(JsString::from("prompt"), 1, prompt)?;
+    let computed_style = NativeFunction::from_fn_ptr(dom::js_get_computed_style);
+    context.register_global_callable(JsString::from("getComputedStyle"), 1, computed_style)?;
 
     Ok(())
 }

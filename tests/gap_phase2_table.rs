@@ -20,7 +20,7 @@ fn layout(html: &str, width: f32, height: f32) -> LayoutResult {
     );
     let fonts = FontSet::embedded();
     let images: HashMap<String, Arc<RgbaImage>> = HashMap::new();
-    layout_document(&page.document, &resolver, &fonts, &images, None)
+    layout_document(&page.document, &resolver, fonts, &images, None)
 }
 
 fn document_rect(result: &LayoutResult, html: &str, selector: &str) -> Rect {

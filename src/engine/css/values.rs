@@ -188,6 +188,37 @@ impl Length {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+    pub translate_x: Length,
+    pub translate_y: Length,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub rotate_deg: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            translate_x: Length::Px(0.0),
+            translate_y: Length::Px(0.0),
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotate_deg: 0.0,
+        }
+    }
+}
+
+impl Transform {
+    pub fn is_identity(&self) -> bool {
+        self.translate_x == Length::Px(0.0)
+            && self.translate_y == Length::Px(0.0)
+            && (self.scale_x - 1.0).abs() < f32::EPSILON
+            && (self.scale_y - 1.0).abs() < f32::EPSILON
+            && self.rotate_deg.abs() < f32::EPSILON
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum GridTrack {
     Auto,
@@ -195,6 +226,15 @@ pub enum GridTrack {
     Fr(f32),
     MinContent,
     MaxContent,
+    MinMax {
+        min: Length,
+        max: Box<GridTrack>,
+    },
+    AutoRepeat {
+        fill: bool,
+        min: Length,
+        tracks: Vec<GridTrack>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

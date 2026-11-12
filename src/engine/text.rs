@@ -1,5 +1,7 @@
 //! Font loading, text measurement and glyph metrics.
 
+use std::sync::OnceLock;
+
 use fontdue::{Font, FontSettings};
 
 use super::css::ComputedStyle;
@@ -75,12 +77,19 @@ impl FontPair {
 
 impl Default for FontSet {
     fn default() -> Self {
-        Self::embedded()
+        Self::load()
     }
 }
 
 impl FontSet {
-    pub fn embedded() -> Self {
+    /// Parsed once per process: font parsing is expensive and layout runs on
+    /// every interaction.
+    pub fn embedded() -> &'static FontSet {
+        static EMBEDDED: OnceLock<FontSet> = OnceLock::new();
+        EMBEDDED.get_or_init(FontSet::load)
+    }
+
+    fn load() -> Self {
         Self {
             sans: FontPair::load(
                 &include_bytes!("../../assets/fonts/DejaVuSans.ttf")[..],

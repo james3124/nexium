@@ -1,5 +1,7 @@
 //! DOM bindings for the JavaScript runtime.
 
+use std::collections::HashMap;
+
 use boa_engine::object::ObjectInitializer;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::property::Attribute;
@@ -111,6 +113,7 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
     let document_element = accessor(get_document_element, None);
     let ready_state = accessor(get_ready_state, None);
     let url = accessor(get_url, None);
+    let cookie = accessor(get_cookie, Some(set_cookie));
 
     let mut initializer = ObjectInitializer::new(context);
     initializer
@@ -259,9 +262,15 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             ready_state.1,
             Attribute::all(),
         )
-        .accessor(JsString::from("URL"), Some(url.0), url.1, Attribute::all());
+        .accessor(JsString::from("URL"), Some(url.0), url.1, Attribute::all())
+        .accessor(
+            JsString::from("cookie"),
+            Some(cookie.0),
+            cookie.1,
+            Attribute::all(),
+        );
 
-    let methods: [(&str, NativeFunction, usize); 23] = [
+    let methods: [(&str, NativeFunction, usize); 25] = [
         (
             "getAttribute",
             NativeFunction::from_fn_ptr(js_get_attribute),
@@ -316,6 +325,16 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             "getElementById",
             NativeFunction::from_fn_ptr(js_get_element_by_id),
             1,
+        ),
+        (
+            "getBoundingClientRect",
+            NativeFunction::from_fn_ptr(js_get_bounding_client_rect),
+            0,
+        ),
+        (
+            "getClientRects",
+            NativeFunction::from_fn_ptr(js_get_client_rects),
+            0,
         ),
         (
             "createElement",
@@ -845,9 +864,10 @@ fn js_get_elements_by_tag_name(
             .descendants(root)
             .into_iter()
             .filter(|&id| {
-                document
-                    .element(id)
-                    .is_some_and(|element| element.name.eq_ignore_ascii_case(&tag))
+                tag == "*"
+                    || document
+                        .element(id)
+                        .is_some_and(|element| element.name.eq_ignore_ascii_case(&tag))
             })
             .collect()
     };
@@ -856,6 +876,203 @@ fn js_get_elements_by_tag_name(
         array.push(wrap_node(id, context)?, context)?;
     }
     Ok(JsValue::from(array))
+}
+
+fn camel_case(name: &str) -> String {
+    let mut camel = String::with_capacity(name.len());
+    let mut upper = false;
+    for character in name.chars() {
+        if character == '-' {
+            upper = true;
+        } else if upper {
+            camel.push(character.to_ascii_uppercase());
+            upper = false;
+        } else {
+            camel.push(character);
+        }
+    }
+    camel
+}
+
+fn js_style_get_property(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = string_arg(args, 0, context).unwrap_or_default();
+    let name = name.to_ascii_lowercase();
+    let Some(object) = this.as_object() else {
+        return Ok(js_string_value(""));
+    };
+    let map = object.get(JsString::from("__nexium_style"), context)?;
+    let Some(map) = map.as_object() else {
+        return Ok(js_string_value(""));
+    };
+    let value = map.get(JsString::from(name.as_str()), context)?;
+    Ok(if value.is_undefined() {
+        js_string_value("")
+    } else {
+        value
+    })
+}
+
+fn js_style_get_priority(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(js_string_value(""))
+}
+
+pub(crate) fn js_get_computed_style(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::null());
+    };
+    let node = node_of(target, context)?;
+    let styles = with_state(|state| state.computed_styles.get(&node.index()).cloned()).flatten();
+    let styles = styles.unwrap_or_else(|| inline_style_map(node));
+    let realm = context.realm().clone();
+    let mut hidden = ObjectInitializer::new(context);
+    for (name, value) in &styles {
+        hidden.property(
+            JsString::from(name.as_str()),
+            js_string_value(value),
+            Attribute::all(),
+        );
+    }
+    let hidden = hidden.build();
+    let mut object = ObjectInitializer::new(context);
+    for (name, value) in &styles {
+        object.property(
+            JsString::from(name.as_str()),
+            js_string_value(value),
+            Attribute::all(),
+        );
+        let camel = camel_case(name);
+        if camel != *name {
+            object.property(
+                JsString::from(camel.as_str()),
+                js_string_value(value),
+                Attribute::all(),
+            );
+        }
+    }
+    object
+        .property(
+            JsString::from("__nexium_style"),
+            JsValue::from(hidden),
+            Attribute::empty(),
+        )
+        .property(
+            JsString::from("getPropertyValue"),
+            NativeFunction::from_fn_ptr(js_style_get_property).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("getPropertyPriority"),
+            NativeFunction::from_fn_ptr(js_style_get_priority).to_js_function(&realm),
+            Attribute::all(),
+        );
+    Ok(JsValue::from(object.build()))
+}
+
+/// During initial script execution no layout has been published yet; fall
+/// back to the element's inline declarations so reads like
+/// `getComputedStyle(el).color` still work.
+fn inline_style_map(node: NodeId) -> HashMap<String, String> {
+    let Some(document) = document_rc() else {
+        return HashMap::new();
+    };
+    let text = {
+        let document = document.borrow();
+        document
+            .get_attribute(node, "style")
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    crate::engine::css::parse_declaration_list(&text)
+        .into_iter()
+        .map(|declaration| {
+            (
+                declaration.name.to_ascii_lowercase(),
+                serialize_components(&declaration.value),
+            )
+        })
+        .collect()
+}
+
+fn layout_rect_for(node: NodeId) -> [f32; 4] {
+    with_state(|state| state.layout_rects.get(&node.index()).copied())
+        .flatten()
+        .unwrap_or([0.0, 0.0, 0.0, 0.0])
+}
+
+fn rect_object(rect: [f32; 4], context: &mut Context) -> JsResult<JsValue> {
+    let [x, y, width, height] = rect;
+    let mut object = ObjectInitializer::new(context);
+    for (name, value) in [
+        ("x", x),
+        ("y", y),
+        ("width", width),
+        ("height", height),
+        ("top", y),
+        ("left", x),
+        ("right", x + width),
+        ("bottom", y + height),
+    ] {
+        object.property(
+            JsString::from(name),
+            JsValue::from(value as f64),
+            Attribute::all(),
+        );
+    }
+    Ok(JsValue::from(object.build()))
+}
+
+fn js_get_bounding_client_rect(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let rect = layout_rect_for(node);
+    rect_object(rect, context)
+}
+
+fn js_get_client_rects(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let array = JsArray::new(context)?;
+    let node = node_of(this, context)?;
+    array.push(rect_object(layout_rect_for(node), context)?, context)?;
+    Ok(JsValue::from(array))
+}
+
+fn get_cookie(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let pair = with_state(|state| (state.client.clone(), state.base_url.clone()));
+    let Some((Some(client), base_url)) = pair else {
+        return Ok(js_string_value(""));
+    };
+    Ok(js_string_value(
+        &client.cookie_header_for_url(&base_url).unwrap_or_default(),
+    ))
+}
+
+fn set_cookie(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(value) = string_arg(args, 0, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let pair = with_state(|state| (state.client.clone(), state.base_url.clone()));
+    if let Some((Some(client), base_url)) = pair {
+        client.set_document_cookie(&base_url, &value);
+    }
+    Ok(JsValue::undefined())
 }
 
 fn js_get_element_by_id(

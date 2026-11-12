@@ -250,6 +250,21 @@ impl HttpClient {
         self.cache.set_disk_dir(dir)
     }
 
+    /// `Cookie` header value for a URL, for `document.cookie` reads.
+    pub fn cookie_header_for_url(&self, url: &Url) -> Option<String> {
+        self.cookies
+            .lock()
+            .ok()
+            .and_then(|jar| jar.cookie_header(url))
+    }
+
+    /// Apply a script-visible `document.cookie` assignment.
+    pub fn set_document_cookie(&self, url: &Url, value: &str) {
+        if let Ok(mut jar) = self.cookies.lock() {
+            jar.set_document_cookie(url, value);
+        }
+    }
+
     pub fn cookie_count(&self) -> usize {
         self.cookies.lock().map(|jar| jar.len()).unwrap_or(0)
     }

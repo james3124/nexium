@@ -60,15 +60,15 @@ Or download a release archive directly:
 
 | Platform | Archive |
 |---|---|
-| Linux x86_64 | `nexium-v0.8.1-linux-x64.tar.gz` |
-| Linux arm64 | `nexium-v0.8.1-linux-arm64.tar.gz` |
-| macOS arm64 | `nexium-v0.8.1-darwin-arm64.tar.gz` |
-| macOS x86_64 | `nexium-v0.8.1-darwin-x64.tar.gz` |
-| Windows x86_64 | `nexium-v0.8.1-win32-x64.tar.gz` |
+| Linux x86_64 | `nexium-v0.8.2-linux-x64.tar.gz` |
+| Linux arm64 | `nexium-v0.8.2-linux-arm64.tar.gz` |
+| macOS arm64 | `nexium-v0.8.2-darwin-arm64.tar.gz` |
+| macOS x86_64 | `nexium-v0.8.2-darwin-x64.tar.gz` |
+| Windows x86_64 | `nexium-v0.8.2-win32-x64.tar.gz` |
 
 ```bash
 curl -L -o nexium.tar.gz \
-  https://github.com/james3124/nexium/releases/download/v0.8.1/nexium-v0.8.1-linux-x64.tar.gz
+  https://github.com/james3124/nexium/releases/download/v0.8.2/nexium-v0.8.2-linux-x64.tar.gz
 tar -xzf nexium.tar.gz
 ./nexium --version
 ```
@@ -251,9 +251,11 @@ than hidden:
   [docs/ROADMAP.md](docs/ROADMAP.md)
 - npm packaging and release workflow: [docs/NPM.md](docs/NPM.md)
 
-Not implemented yet: CSS transforms/transitions/animations, floats, subgrid,
-flex column wrapping, SVG filters, box shadows, HTTP/3, and full WPT
-conformance.
+Not implemented yet: CSS transitions/animations, floats, subgrid, named grid
+lines/areas, flex column wrapping, rotated transforms, SVG filters, box
+shadows, HTTP/3, and full WPT conformance. `translate`/`scale` transforms,
+grid `auto-fit`/`auto-fill`, `getBoundingClientRect` and `getComputedStyle`
+are supported.
 
 ## Development
 

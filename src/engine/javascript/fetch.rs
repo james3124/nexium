@@ -80,6 +80,14 @@ pub(crate) fn fetch_text_sync(
     }
 }
 
+pub(crate) fn fetch_bytes_sync(
+    url: Url,
+    client: Option<Arc<HttpClient>>,
+) -> std::result::Result<Vec<u8>, String> {
+    let request = Request::get(url);
+    blocking_fetch(client, request).map(|response| response.body.to_vec())
+}
+
 fn extract_header_pairs(value: &JsValue, context: &mut Context) -> Vec<(String, String)> {
     let Some(object) = value.as_object() else {
         return Vec::new();

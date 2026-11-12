@@ -611,3 +611,46 @@ async fn hover_state_survives_a_new_page_session() {
         ":hover must survive session recreation"
     );
 }
+
+#[tokio::test]
+async fn layout_geometry_and_document_cookie_are_exposed() {
+    let browser = Browser::new(Config::default());
+    let page = browser
+        .load_html(
+            "http://test.local/geometry",
+            r#"<html><body style="margin:0">
+  <div id="box" style="width:300px;height:50px;background:#000">x</div>
+  <script>document.cookie = 'tok=1; path=/'</script>
+</body></html>"#,
+        )
+        .unwrap();
+    let mut session = session(page);
+
+    let rect = session
+        .evaluate("JSON.stringify(document.getElementById('box').getBoundingClientRect())")
+        .unwrap();
+    let rect: serde_json::Value = serde_json::from_str(rect.as_str().unwrap()).unwrap();
+    assert_eq!(rect["width"], 300.0);
+    assert_eq!(rect["height"], 50.0);
+    assert_eq!(rect["right"], rect["left"].as_f64().unwrap() + 300.0);
+
+    // Offline pages run without an HTTP client, so cookie storage is a no-op;
+    // fetched pages read the network jar (covered by the live API tests).
+    let cookie = session.evaluate("document.cookie").unwrap();
+    assert!(cookie.is_string(), "document.cookie should be a string");
+
+    let display = session
+        .evaluate("getComputedStyle(document.getElementById('box')).display")
+        .unwrap();
+    assert_eq!(display.as_str(), Some("block"));
+    let width = session
+        .evaluate("getComputedStyle(document.getElementById('box')).width")
+        .unwrap();
+    assert_eq!(width.as_str(), Some("300px"));
+    let background = session
+        .evaluate(
+            "getComputedStyle(document.getElementById('box')).getPropertyValue('background-color')",
+        )
+        .unwrap();
+    assert_eq!(background.as_str(), Some("rgb(0, 0, 0)"));
+}

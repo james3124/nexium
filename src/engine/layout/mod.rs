@@ -214,9 +214,10 @@ pub fn layout_document(
     };
 
     apply_relative_offsets(&mut root, viewport);
+    apply_transforms(&mut root, engine.root_font_size, viewport);
 
     let mut node_rects = HashMap::new();
-    collect_node_rects(&root, &mut node_rects);
+    collect_node_rects(&root, doc, &mut node_rects);
     engine.layout_positioned(&mut root, &mut node_rects);
 
     let document_height = root.rect.bottom().max(viewport.height).max(0.0);
@@ -2679,6 +2680,37 @@ impl<'a> LayoutEngine<'a> {
         }
     }
 
+    /// Expand `auto-fit`/`auto-fill` repetitions for a given container width.
+    fn expand_grid_tracks(
+        &self,
+        tracks: &[GridTrack],
+        width: f32,
+        gap: f32,
+        style: &ComputedStyle,
+    ) -> Vec<GridTrack> {
+        let mut expanded = Vec::new();
+        for track in tracks {
+            if let GridTrack::AutoRepeat {
+                fill: _,
+                min,
+                tracks: inner,
+            } = track
+            {
+                let min_px = min
+                    .resolve(style.font_size, self.root_font_size, self.viewport, width)
+                    .unwrap_or(0.0)
+                    .max(1.0);
+                let count = (((width + gap) / (min_px + gap)).floor() as usize).max(1);
+                for _ in 0..count {
+                    expanded.extend(inner.iter().cloned());
+                }
+            } else {
+                expanded.push(track.clone());
+            }
+        }
+        expanded
+    }
+
     #[allow(clippy::needless_range_loop)]
     fn layout_grid_children(
         &mut self,
@@ -2700,6 +2732,25 @@ impl<'a> LayoutEngine<'a> {
             placed_col: usize,
         }
 
+        let repeat_gap = style
+            .column_gap
+            .resolve(
+                style.font_size,
+                self.root_font_size,
+                self.viewport,
+                content_width,
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+        let template_columns = self.expand_grid_tracks(
+            &style.grid_template_columns,
+            content_width,
+            repeat_gap,
+            style,
+        );
+        let template_rows =
+            self.expand_grid_tracks(&style.grid_template_rows, content_width, repeat_gap, style);
+
         let mut items: Vec<GridItem> = Vec::new();
         for (order, child) in self.doc.children(node).to_vec().into_iter().enumerate() {
             let NodeData::Element(_) = &self.doc.node(child).data else {
@@ -2713,8 +2764,8 @@ impl<'a> LayoutEngine<'a> {
                 self.positioned.push(child);
                 continue;
             }
-            let explicit_cols = style.grid_template_columns.len().max(1);
-            let explicit_rows = style.grid_template_rows.len().max(1);
+            let explicit_cols = template_columns.len().max(1);
+            let explicit_rows = template_rows.len().max(1);
             let (col, col_span) = grid_axis(
                 child_style.grid_column_start,
                 child_style.grid_column_end,
@@ -2744,8 +2795,8 @@ impl<'a> LayoutEngine<'a> {
                 .then(a.order.cmp(&b.order))
         });
 
-        let mut columns = style.grid_template_columns.len().max(1);
-        let mut rows = style.grid_template_rows.len().max(1);
+        let mut columns = template_columns.len().max(1);
+        let mut rows = template_rows.len().max(1);
         for item in &items {
             if let Some(col) = item.col {
                 columns = columns.max(col + item.col_span);
@@ -2885,8 +2936,7 @@ impl<'a> LayoutEngine<'a> {
         let mut auto_columns = Vec::new();
         let mut fr_total = 0.0f32;
         for column in 0..columns {
-            let track = style
-                .grid_template_columns
+            let track = template_columns
                 .get(column)
                 .cloned()
                 .unwrap_or_else(|| style.grid_auto_columns.clone());
@@ -2903,7 +2953,24 @@ impl<'a> LayoutEngine<'a> {
                         .max(0.0);
                 }
                 GridTrack::Fr(fr) => fr_total += fr.max(0.0),
-                GridTrack::Auto | GridTrack::MinContent | GridTrack::MaxContent => {
+                GridTrack::MinMax { min, max } => {
+                    column_widths[column] = min
+                        .resolve(
+                            style.font_size,
+                            self.root_font_size,
+                            self.viewport,
+                            content_width,
+                        )
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                    if let GridTrack::Fr(fr) = *max {
+                        fr_total += fr.max(0.0);
+                    }
+                }
+                GridTrack::Auto
+                | GridTrack::MinContent
+                | GridTrack::MaxContent
+                | GridTrack::AutoRepeat { .. } => {
                     auto_columns.push(column);
                 }
             }
@@ -2938,12 +3005,19 @@ impl<'a> LayoutEngine<'a> {
         let remaining = (content_width - used).max(0.0);
         if fr_total > 0.0 && remaining > 0.0 {
             for column in 0..columns {
-                let track = style
-                    .grid_template_columns
+                let track = template_columns
                     .get(column)
                     .cloned()
                     .unwrap_or_else(|| style.grid_auto_columns.clone());
-                if let GridTrack::Fr(fr) = track {
+                let fr = match track {
+                    GridTrack::Fr(fr) => Some(fr),
+                    GridTrack::MinMax { max, .. } => match *max {
+                        GridTrack::Fr(fr) => Some(fr),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(fr) = fr {
                     column_widths[column] += remaining * fr.max(0.0) / fr_total;
                 }
             }
@@ -2959,8 +3033,7 @@ impl<'a> LayoutEngine<'a> {
         let mut fr_rows = Vec::new();
         let mut fr_row_total = 0.0f32;
         for row in 0..rows {
-            let track = style
-                .grid_template_rows
+            let track = template_rows
                 .get(row)
                 .cloned()
                 .unwrap_or_else(|| style.grid_auto_rows.clone());
@@ -2979,6 +3052,21 @@ impl<'a> LayoutEngine<'a> {
                 GridTrack::Fr(fr) => {
                     fr_rows.push(row);
                     fr_row_total += fr.max(0.0);
+                }
+                GridTrack::MinMax { min, max } => {
+                    row_heights[row] = min
+                        .resolve(
+                            style.font_size,
+                            self.root_font_size,
+                            self.viewport,
+                            self.containing_height.unwrap_or(0.0),
+                        )
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                    if let GridTrack::Fr(fr) = *max {
+                        fr_rows.push(row);
+                        fr_row_total += fr.max(0.0);
+                    }
                 }
                 _ => auto_rows.push(row),
             }
@@ -3221,7 +3309,7 @@ impl<'a> LayoutEngine<'a> {
                 box_.rect.x = base.x + base.width - right - box_.rect.width - margin.right;
             }
 
-            collect_node_rects(&box_, node_rects);
+            collect_node_rects(&box_, self.doc, node_rects);
             let parent_node = self.doc.parent(node);
             let inserted = parent_node
                 .map(|parent| attach_box(root, parent, box_.clone()))
@@ -3443,6 +3531,88 @@ fn push_text_tokens(
     }
 }
 
+fn transform_point(value: f32, origin: f32, scale: f32, translate: f32) -> f32 {
+    origin + (value - origin) * scale + translate
+}
+
+fn transform_subtree(
+    box_: &mut LayoutBox,
+    origin_x: f32,
+    origin_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    translate_x: f32,
+    translate_y: f32,
+) {
+    box_.rect.x = transform_point(box_.rect.x, origin_x, scale_x, translate_x);
+    box_.rect.y = transform_point(box_.rect.y, origin_y, scale_y, translate_y);
+    box_.rect.width *= scale_x;
+    box_.rect.height *= scale_y;
+    for line in &mut box_.lines {
+        line.y = transform_point(line.y, origin_y, scale_y, translate_y);
+        line.baseline = transform_point(line.baseline, origin_y, scale_y, translate_y);
+        line.height *= scale_y;
+        for fragment in &mut line.fragments {
+            fragment.x = transform_point(fragment.x, origin_x, scale_x, translate_x);
+            fragment.width *= scale_x;
+        }
+    }
+    for child in &mut box_.children {
+        transform_subtree(
+            child,
+            origin_x,
+            origin_y,
+            scale_x,
+            scale_y,
+            translate_x,
+            translate_y,
+        );
+    }
+    for atomic in &mut box_.atomics {
+        transform_subtree(
+            atomic,
+            origin_x,
+            origin_y,
+            scale_x,
+            scale_y,
+            translate_x,
+            translate_y,
+        );
+    }
+}
+
+fn apply_transforms(box_: &mut LayoutBox, root_font_size: f32, viewport: Viewport) {
+    let transform = box_.style.transform;
+    if !transform.is_identity() {
+        let style = Arc::clone(&box_.style);
+        let translate_x = transform
+            .translate_x
+            .resolve(style.font_size, root_font_size, viewport, box_.rect.width)
+            .unwrap_or(0.0);
+        let translate_y = transform
+            .translate_y
+            .resolve(style.font_size, root_font_size, viewport, box_.rect.height)
+            .unwrap_or(0.0);
+        let origin_x = box_.rect.x + box_.rect.width / 2.0;
+        let origin_y = box_.rect.y + box_.rect.height / 2.0;
+        transform_subtree(
+            box_,
+            origin_x,
+            origin_y,
+            transform.scale_x,
+            transform.scale_y,
+            translate_x,
+            translate_y,
+        );
+    }
+    for child in &mut box_.children {
+        apply_transforms(child, root_font_size, viewport);
+    }
+    for atomic in &mut box_.atomics {
+        apply_transforms(atomic, root_font_size, viewport);
+    }
+}
+
 fn apply_relative_offsets(root: &mut LayoutBox, viewport: Viewport) {
     apply_relative_recursive(root, None, viewport);
 }
@@ -3551,15 +3721,58 @@ fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {
     }
 }
 
-fn collect_node_rects(box_: &LayoutBox, out: &mut HashMap<NodeId, Rect>) {
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
+fn collect_node_rects(box_: &LayoutBox, doc: &Document, out: &mut HashMap<NodeId, Rect>) {
     if let Some(node) = box_.node {
         out.entry(node).or_insert(box_.rect);
     }
+    // Inline elements (notably links) have no layout box of their own; derive
+    // a bounding rect from their text fragments so selector-driven tools can
+    // resolve them.
+    for line in &box_.lines {
+        for fragment in &line.fragments {
+            let Some(node) = fragment.node else {
+                continue;
+            };
+            let rect = Rect {
+                x: fragment.x,
+                y: line.y,
+                width: fragment.width,
+                height: line.height,
+            };
+            match out.get_mut(&node) {
+                Some(existing) => *existing = union_rect(*existing, rect),
+                None => {
+                    out.insert(node, rect);
+                }
+            }
+            let mut ancestor = doc.parent(node);
+            while let Some(parent) = ancestor {
+                if out.contains_key(&parent) {
+                    break;
+                }
+                out.insert(parent, rect);
+                ancestor = doc.parent(parent);
+            }
+        }
+    }
     for child in &box_.children {
-        collect_node_rects(child, out);
+        collect_node_rects(child, doc, out);
     }
     for atomic in &box_.atomics {
-        collect_node_rects(atomic, out);
+        collect_node_rects(atomic, doc, out);
     }
 }
 

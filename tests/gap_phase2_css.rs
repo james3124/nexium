@@ -94,7 +94,7 @@ fn layout(html: &str, width: f32, height: f32) -> LayoutResult {
     );
     let fonts = FontSet::embedded();
     let images: HashMap<String, Arc<RgbaImage>> = HashMap::new();
-    layout_document(&page.document, &resolver, &fonts, &images, None)
+    layout_document(&page.document, &resolver, fonts, &images, None)
 }
 
 /// Render `html` at `width` and return the laid-out width of `#box`.
@@ -324,4 +324,60 @@ fn hover_rules_do_not_apply_without_a_hover_target() {
     // The user-agent stylesheet must not contain pseudo-hover rules; hover
     // matching is purely DOM-driven.
     assert!(!UA_CSS.contains(":hover"));
+}
+
+#[test]
+fn grid_auto_fit_repeat_expands_to_container_width() {
+    let items: String = (0..6)
+        .map(|index| format!("<div class=\"item\" id=\"i{index}\"></div>"))
+        .collect();
+    let html = format!(
+        "<html><body style=\"margin:0\"><div id=\"g\" style=\"display:grid;\
+         grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;padding:10px\">\
+         {items}</div><style>.item{{height:20px;background:#ccc}}</style></body></html>"
+    );
+    let result = layout(&html, 1280.0, 720.0);
+    let page = Page::from_html(url::Url::parse("https://css-gap.test/").unwrap(), &html);
+    let ids = page.select_all(".item").unwrap();
+    assert_eq!(ids.len(), 6);
+    let rects: Vec<_> = ids
+        .iter()
+        .map(|id| result.node_rects.get(id).copied().expect("grid item rect"))
+        .collect();
+    // ~1260px content with 10px gaps fits four 300px-minimum tracks.
+    assert!(rects[0].width > 280.0, "width {}", rects[0].width);
+    for rect in &rects {
+        assert!((rect.width - rects[0].width).abs() < 1.0);
+    }
+    assert!(
+        (rects[3].y - rects[0].y).abs() < 1.0,
+        "four items share a row"
+    );
+    assert!(rects[4].y > rects[0].y + 10.0, "fifth item wraps");
+}
+
+#[test]
+fn transform_translate_and_scale_change_geometry() {
+    let html = r#"<html><body style="margin:0"><div id="box"
+        style="width:100px;height:50px;transform:translate(20px,10px)"></div></body></html>"#;
+    let result = layout(html, 800.0, 600.0);
+    let page = Page::from_html(url::Url::parse("https://css-gap.test/").unwrap(), html);
+    let node = page.select("#box").unwrap().unwrap();
+    let rect = result.node_rects.get(&node).copied().unwrap();
+    assert!((rect.x - 20.0).abs() < 0.5, "x {}", rect.x);
+    assert!((rect.y - 10.0).abs() < 0.5, "y {}", rect.y);
+
+    let html = r#"<html><body style="margin:0"><div id="box"
+        style="width:100px;height:50px;transform:scale(2)"></div></body></html>"#;
+    let result = layout(html, 800.0, 600.0);
+    let page = Page::from_html(url::Url::parse("https://css-gap.test/").unwrap(), html);
+    let node = page.select("#box").unwrap().unwrap();
+    let rect = result.node_rects.get(&node).copied().unwrap();
+    assert!((rect.width - 200.0).abs() < 0.5, "width {}", rect.width);
+    assert!((rect.height - 100.0).abs() < 0.5, "height {}", rect.height);
+    assert!(
+        (rect.x + 50.0).abs() < 0.5,
+        "scaled about center: x {}",
+        rect.x
+    );
 }

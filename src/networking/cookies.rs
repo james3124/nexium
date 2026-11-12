@@ -173,6 +173,21 @@ impl CookieJar {
         }
     }
 
+    /// Apply a `document.cookie = "name=value; ..."` assignment.
+    pub fn set_document_cookie(&mut self, url: &Url, value: &str) {
+        if !self.enabled {
+            return;
+        }
+        let header = if value.trim_end().ends_with(';') {
+            format!("{value} path=/")
+        } else {
+            format!("{value}; path=/")
+        };
+        if let Some(cookie) = parse_set_cookie(url, &header) {
+            self.store(cookie);
+        }
+    }
+
     pub fn set_from_headers(&mut self, url: &Url, headers: &HeaderMap) {
         if !self.enabled {
             return;

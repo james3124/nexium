@@ -9,7 +9,10 @@ use serde::Serialize;
 use url::Url;
 
 use crate::browser::Page;
-use crate::engine::css::{Display, Viewport, Visibility};
+use crate::engine::css::{
+    BorderStyle, Color, ComputedStyle, Display, FontStyle, Length, Overflow, Position, TextAlign,
+    Viewport, Visibility, WhiteSpace,
+};
 use crate::engine::dom::{Document, NodeId};
 use crate::engine::javascript::{
     ScriptOptions, ScriptRunResult, SessionEvent, run_page_scripts_inline_persistent,
@@ -209,6 +212,7 @@ impl PageSession {
             session.apply_hover_target();
             session.relayout();
         }
+        session.publish_layout();
         session
     }
 
@@ -288,7 +292,16 @@ impl PageSession {
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
         let (x, y) = self.to_document(x, y);
-        hit_test_box(&self.layout.root, x, y)
+        let node = hit_test_box(&self.layout.root, x, y)?;
+        let document = &self.page.document;
+        let mut current = Some(node);
+        while let Some(id) = current {
+            if document.is_element(id) {
+                return Some(id);
+            }
+            current = document.parent(id);
+        }
+        Some(node)
     }
 
     pub fn element_at(&self, x: f32, y: f32) -> Option<ElementInfo> {
@@ -1265,6 +1278,29 @@ impl PageSession {
 
     fn relayout(&mut self) {
         self.layout = layout_page(&self.page, self.viewport);
+        self.publish_layout();
+    }
+
+    fn publish_layout(&self) {
+        let Some(runtime) = self.page.script_session() else {
+            return;
+        };
+        let rects: HashMap<usize, [f32; 4]> = self
+            .layout
+            .node_rects
+            .iter()
+            .map(|(id, rect)| (id.index(), [rect.x, rect.y, rect.width, rect.height]))
+            .collect();
+        let styles: HashMap<usize, HashMap<String, String>> = self
+            .layout
+            .styles
+            .iter()
+            .map(|(id, style)| {
+                let rect = self.layout.node_rects.get(id).copied();
+                (id.index(), computed_style_strings(style, rect))
+            })
+            .collect();
+        runtime.set_layout(rects, styles);
     }
 
     fn clamp_scroll(&mut self) {
@@ -1473,10 +1509,265 @@ fn hit_test_box(layout_box: &LayoutBox, x: f32, y: f32) -> Option<NodeId> {
         }
     }
     if layout_box.rect.contains(x, y) {
+        // Inline elements (links, spans) are flattened into line fragments;
+        // prefer the fragment so clicks target the inline element itself.
+        for line in &layout_box.lines {
+            if y < line.y || y > line.y + line.height {
+                continue;
+            }
+            for fragment in &line.fragments {
+                if fragment.node.is_some() && x >= fragment.x && x <= fragment.x + fragment.width {
+                    return fragment.node;
+                }
+            }
+        }
         layout_box.node
     } else {
         None
     }
+}
+
+fn css_number(value: f32) -> String {
+    if (value.fract()).abs() < 0.0005 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+fn css_length(length: Length) -> String {
+    match length {
+        Length::Auto => "auto".to_owned(),
+        Length::Px(value) => format!("{}px", css_number(value)),
+        Length::Percent(value) => format!("{}%", css_number(value)),
+        Length::Em(value) => format!("{}em", css_number(value)),
+        Length::Rem(value) => format!("{}rem", css_number(value)),
+        Length::Pt(value) => format!("{}pt", css_number(value)),
+        Length::Vw(value) => format!("{}vw", css_number(value)),
+        Length::Vh(value) => format!("{}vh", css_number(value)),
+        Length::Vmin(value) => format!("{}vmin", css_number(value)),
+        Length::Vmax(value) => format!("{}vmax", css_number(value)),
+        Length::Calc(_) | Length::Min(..) | Length::Max(..) | Length::Clamp(..) => "0px".to_owned(),
+    }
+}
+
+fn css_color(color: Color) -> String {
+    if color.a == 0 {
+        "rgba(0, 0, 0, 0)".to_owned()
+    } else if color.a == 255 {
+        format!("rgb({}, {}, {})", color.r, color.g, color.b)
+    } else {
+        format!(
+            "rgba({}, {}, {}, {})",
+            color.r,
+            color.g,
+            color.b,
+            css_number(color.a as f32 / 255.0)
+        )
+    }
+}
+
+fn border_style_name(style: BorderStyle) -> &'static str {
+    match style {
+        BorderStyle::None => "none",
+        BorderStyle::Solid => "solid",
+        BorderStyle::Dashed => "dashed",
+        BorderStyle::Dotted => "dotted",
+        BorderStyle::Double => "double",
+    }
+}
+
+/// Serialize the computed style subset exposed through `getComputedStyle`.
+fn computed_style_strings(style: &ComputedStyle, rect: Option<Rect>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut put = |name: &str, value: String| {
+        out.insert(name.to_owned(), value);
+    };
+    put(
+        "display",
+        match style.display {
+            Display::None => "none",
+            Display::Block => "block",
+            Display::Inline => "inline",
+            Display::InlineBlock => "inline-block",
+            Display::Flex => "flex",
+            Display::Grid => "grid",
+            Display::ListItem => "list-item",
+            Display::Table => "table",
+            Display::TableRow => "table-row",
+            Display::TableRowGroup => "table-row-group",
+            Display::TableCell => "table-cell",
+        }
+        .to_owned(),
+    );
+    put(
+        "position",
+        match style.position {
+            Position::Static => "static",
+            Position::Relative => "relative",
+            Position::Absolute => "absolute",
+            Position::Fixed => "fixed",
+            Position::Sticky => "sticky",
+        }
+        .to_owned(),
+    );
+    put(
+        "visibility",
+        match style.visibility {
+            Visibility::Visible => "visible",
+            Visibility::Hidden => "hidden",
+        }
+        .to_owned(),
+    );
+    put(
+        "overflow",
+        match style.overflow {
+            Overflow::Visible => "visible",
+            Overflow::Hidden => "hidden",
+            Overflow::Scroll => "scroll",
+            Overflow::Auto => "auto",
+        }
+        .to_owned(),
+    );
+    put(
+        "text-align",
+        match style.text_align {
+            TextAlign::Left => "left",
+            TextAlign::Right => "right",
+            TextAlign::Center => "center",
+            TextAlign::Justify => "justify",
+        }
+        .to_owned(),
+    );
+    put(
+        "white-space",
+        match style.white_space {
+            WhiteSpace::Normal => "normal",
+            WhiteSpace::Nowrap => "nowrap",
+            WhiteSpace::Pre => "pre",
+            WhiteSpace::PreWrap => "pre-wrap",
+        }
+        .to_owned(),
+    );
+    put(
+        "font-style",
+        match style.font_style {
+            FontStyle::Normal => "normal",
+            FontStyle::Italic => "italic",
+        }
+        .to_owned(),
+    );
+    put("color", css_color(style.color));
+    put("background-color", css_color(style.background_color));
+    put("font-size", format!("{}px", css_number(style.font_size)));
+    put("font-weight", style.font_weight.to_string());
+    put("font-family", style.font_family.clone());
+    put(
+        "line-height",
+        format!("{}px", css_number(style.line_height)),
+    );
+    put("opacity", css_number(style.opacity));
+    put("z-index", style.z_index.to_string());
+    put(
+        "width",
+        rect.map_or_else(
+            || css_length(style.width),
+            |rect| format!("{}px", css_number(rect.width)),
+        ),
+    );
+    put(
+        "height",
+        rect.map_or_else(
+            || css_length(style.height),
+            |rect| format!("{}px", css_number(rect.height)),
+        ),
+    );
+    for (prefix, length) in [
+        ("margin-top", style.margin.top),
+        ("margin-right", style.margin.right),
+        ("margin-bottom", style.margin.bottom),
+        ("margin-left", style.margin.left),
+        ("padding-top", style.padding.top),
+        ("padding-right", style.padding.right),
+        ("padding-bottom", style.padding.bottom),
+        ("padding-left", style.padding.left),
+        ("min-width", style.min_width),
+        ("max-width", style.max_width),
+        ("min-height", style.min_height),
+        ("max-height", style.max_height),
+        ("border-radius", style.border_radius),
+        ("top", style.top),
+        ("right", style.right),
+        ("bottom", style.bottom),
+        ("left", style.left),
+        ("flex-basis", style.flex_basis),
+        ("row-gap", style.row_gap),
+        ("column-gap", style.column_gap),
+    ] {
+        put(prefix, css_length(length));
+    }
+    for (prefix, width, border, color) in [
+        (
+            "border-top",
+            style.border_width.top,
+            style.border_style.top,
+            style.border_color.top,
+        ),
+        (
+            "border-right",
+            style.border_width.right,
+            style.border_style.right,
+            style.border_color.right,
+        ),
+        (
+            "border-bottom",
+            style.border_width.bottom,
+            style.border_style.bottom,
+            style.border_color.bottom,
+        ),
+        (
+            "border-left",
+            style.border_width.left,
+            style.border_style.left,
+            style.border_color.left,
+        ),
+    ] {
+        put(
+            &format!("{prefix}-width"),
+            format!("{}px", css_number(width)),
+        );
+        put(
+            &format!("{prefix}-style"),
+            border_style_name(border).to_owned(),
+        );
+        put(&format!("{prefix}-color"), css_color(color));
+    }
+    put("flex-grow", css_number(style.flex_grow));
+    put("flex-shrink", css_number(style.flex_shrink));
+    let transform = style.transform;
+    put(
+        "transform",
+        if transform.is_identity() {
+            "none".to_owned()
+        } else {
+            let translate_x = match transform.translate_x {
+                Length::Px(value) => value,
+                _ => 0.0,
+            };
+            let translate_y = match transform.translate_y {
+                Length::Px(value) => value,
+                _ => 0.0,
+            };
+            format!(
+                "matrix({}, 0, 0, {}, {}, {})",
+                css_number(transform.scale_x),
+                css_number(transform.scale_y),
+                css_number(translate_x),
+                css_number(translate_y)
+            )
+        },
+    );
+    out
 }
 
 pub fn extract_page(page: &Page) -> ExtractedPage {

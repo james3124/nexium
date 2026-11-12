@@ -284,14 +284,17 @@ graphics and scripted pages, with unsupported areas explicitly tracked.
 
 ### Phase 7 remaining gaps (tracked)
 
-- CSS transforms, transitions, animations, floats, subgrid, named grid
-  lines/areas, auto-fit and flex column wrapping.
-- Canvas text, gradients and `drawImage` (canvases and `data:` images) exist;
-  kerning, network-image pixels and path effects remain. SVG gradients,
-  patterns, fill rules and opacity exist; filters, gradient transforms and
-  full transform syntax remain. HTTP/3 is still deferred.
-- Full getComputedStyle cascade values; broader Web APIs and complex web
-  application compatibility are incremental.
+- CSS transitions, animations, floats, subgrid, named grid lines/areas and
+  flex column wrapping. `repeat(auto-fit/auto-fill, minmax(...))` and
+  `translate`/`scale` transforms are implemented; `rotate()` parses but is not
+  rasterized.
+- Canvas text (with kerning), gradients and `drawImage` (canvases, `data:` and
+  network `<img>` images) exist; path effects and shadows remain. SVG
+  gradients, patterns, fill rules and opacity exist; filters, gradient
+  transforms and full transform syntax remain. HTTP/3 is still deferred.
+- `getBoundingClientRect`/`getClientRects` and a jar-backed `document.cookie`
+  are available; full getComputedStyle cascade values remain incremental, as
+  do broader Web APIs and complex web application compatibility.
 
 ## Phase 8 — Optimization and stability (complete hardening pass)
 

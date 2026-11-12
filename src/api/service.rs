@@ -722,12 +722,23 @@ impl ApiService {
             options.y,
         )?;
         let button = parse_button(options.button.as_deref())?;
-        let result = browser.click_with_button(x, y, button)?;
-        let data = json!({
+        let (result, navigation) = browser.click_with_navigation(x, y, button)?;
+        let element = browser.element_at(x, y)?;
+        let mut data = json!({
             "x": x, "y": y,
             "result": result,
-            "element": browser.element_at(x, y)?,
+            "element": element,
         });
+        if let Some(navigation) = navigation {
+            let target = navigation.url.clone();
+            let outcome = browser.navigate_navigation(navigation).await;
+            data["navigation"] = json!({
+                "url": target,
+                "ok": outcome.is_ok(),
+                "page": outcome.as_ref().ok().map(|_| page_summary(&browser)),
+                "error": outcome.as_ref().err().map(|error| error.to_string()),
+            });
+        }
         self.emit(
             "interaction",
             Some(&entry.id),

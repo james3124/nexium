@@ -37,8 +37,8 @@ The launcher looks for the binary in this order:
 2. Tag and push:
 
    ```bash
-   git tag v0.8.1
-   git push origin v0.8.1
+   git tag v0.8.2
+   git push origin v0.8.2
    ```
 
 3. `.github/workflows/release.yml` builds release binaries for

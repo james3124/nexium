@@ -21,5 +21,6 @@ pub use values::{
     AlignContent, AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BackgroundSizeMode,
     BorderStyle, BoxSizing, Color, Display, Edges, FlexDirection, FlexWrap, FontStyle,
     GridAutoFlow, GridPlacement, GridTrack, JustifyContent, Length, LineHeight, ListStyleType,
-    Overflow, PaintColor, Position, TextAlign, TextDecoration, Viewport, Visibility, WhiteSpace,
+    Overflow, PaintColor, Position, TextAlign, TextDecoration, Transform, Viewport, Visibility,
+    WhiteSpace,
 };

@@ -22,7 +22,7 @@ use crate::interaction::{
     AccessibilityNode, DomSnapshot, ElementInfo, ExtractedPage, InputResult, MouseButton,
     PageSession, extract_page,
 };
-use crate::networking::{HttpClient, parse_url};
+use crate::networking::{HttpClient, Request, parse_url};
 use crate::rendering::{RenderOptions, RenderedPage, render_page};
 use crate::storage::{HistoryEntry, Profile, read_locked, write_atomic};
 use crate::utils::{NxError, Result};
@@ -230,6 +230,21 @@ impl Browser {
         self.with_page_session(|session| session.click_with_button(x, y, button))
     }
 
+    /// Click and return any navigation the click requested (links, submit
+    /// buttons). Callers decide whether to follow it.
+    pub fn click_with_navigation(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+    ) -> Result<(InputResult, Option<crate::interaction::Navigation>)> {
+        self.with_page_session(|session| {
+            let result = session.click_with_button(x, y, button);
+            let navigation = session.take_navigation();
+            (result, navigation)
+        })
+    }
+
     pub fn double_click(&mut self, x: f32, y: f32) -> Result<InputResult> {
         self.with_page_session(|session| session.double_click(x, y))
     }
@@ -323,7 +338,12 @@ impl Browser {
     }
 
     async fn load_into_tab(&self, tab: &mut Tab, url: Url) -> Result<Page> {
-        let mut page = Page::load(&self.client, url).await?;
+        let request = Request::get(url);
+        self.load_request_into_tab(tab, request).await
+    }
+
+    async fn load_request_into_tab(&self, tab: &mut Tab, request: Request) -> Result<Page> {
+        let mut page = Page::load_request(&self.client, request).await?;
         let origin = page.url.origin().ascii_serialization();
         let local_storage = match &self.profile {
             Some(profile) => profile.load_local_storage(&origin)?,
@@ -451,14 +471,30 @@ impl Browser {
 
     /// Navigate the active tab, recording a new history entry.
     pub async fn navigate(&mut self, url: &str) -> Result<Page> {
+        let url = parse_url(url)?;
+        let request = Request::get(url);
+        self.navigate_request(request).await
+    }
+
+    /// Follow a click-generated navigation (link GET or form GET/POST).
+    pub async fn navigate_navigation(
+        &mut self,
+        navigation: crate::interaction::Navigation,
+    ) -> Result<Page> {
+        let url = parse_url(&navigation.url)?;
+        let request =
+            Page::navigation_request(url, &navigation.method, navigation.body.as_deref())?;
+        self.navigate_request(request).await
+    }
+
+    async fn navigate_request(&mut self, request: Request) -> Result<Page> {
         if self.tabs.is_empty() {
             return Err(NxError::Browser("no active tab".to_owned()));
         }
-        let url = parse_url(url)?;
         let index = self.active;
         let mut tab = self.tabs.remove(index);
         tab.history.truncate(tab.history_index + 1);
-        let result = self.load_into_tab(&mut tab, url).await;
+        let result = self.load_request_into_tab(&mut tab, request).await;
         let page = match result {
             Ok(page) => page,
             Err(error) => {

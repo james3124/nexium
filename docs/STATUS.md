@@ -136,8 +136,9 @@ limitations and licensing details. Product overview and usage live in
 - Keyboard interactions: focused input/textarea/contenteditable targets,
   keydown/keypress/keyup, text insertion, Backspace and modifier flags;
   Tab/Shift+Tab focus traversal, focus/blur and Input events fire as DOM
-  events. Clicking a link records the navigation target and form submit
-  buttons/Enter submit GET or POST through the page-load path.
+  events. Clicking a link or a submit button (and Enter in a text input)
+  navigates the active tab, including GET/POST form submission via the
+  page-load path.
 - Hover tracks the hit element for `:hover` styling and dispatches trusted
   synthetic events; text selection over focused editable content is exposed.
 - Screenshots: full page, scrolled viewport crops and element crops.
@@ -174,24 +175,31 @@ limitations and licensing details. Product overview and usage live in
 
 **Phase 7 — Modern web compatibility** is implemented as a tested subset:
 
-- CSS Grid: explicit/implicit rows and columns, `repeat()`, `fr`/length/auto
-  tracks, row/column spans, line placement, auto-placement, gaps, stretch and
-  item alignment.
+- CSS Grid: explicit/implicit rows and columns, numeric `repeat()`,
+  `repeat(auto-fit/auto-fill, minmax(...))`, `fr`/length/auto tracks,
+  row/column spans, line placement, auto-placement, gaps, stretch and item
+  alignment.
 - Advanced flexbox: row/column reverse and column main-axis `justify-content`.
 - SVG painting: `svg`/`g`, viewBox scaling, rect, circle, ellipse, line,
   polyline, polygon, path (`M/L/H/V/C/S/Q/T/A/Z` approximations), fill/stroke,
   opacity, fill rules, linear/radial gradients, patterns, translate/scale
   transforms and text.
 - Canvas 2D subset: rects, paths, arcs, fills/strokes, text
-  (`fillText`/`strokeText`/`measureText`), linear/radial gradients, `drawImage`
-  from canvases and `data:` images, transforms, styles, `globalAlpha`,
-  `save`/`restore`, `toDataURL`, and screenshots that include canvas pixels.
+  (`fillText`/`strokeText`/`measureText`, kerning), linear/radial gradients,
+  `drawImage` from canvases, `data:` images and network `<img>` sources,
+  transforms, styles, `globalAlpha`, `save`/`restore`, `toDataURL`, and
+  screenshots that include canvas pixels.
 - Page WebSocket client (`onopen`/`onmessage`/`onerror`/`onclose`, send/close)
   with echo tested against a real WebSocket server.
 - Web Workers: background Boa runtime, external worker scripts, structured
   `postMessage` and `onmessage`.
-- Modern APIs: `matchMedia`, `getComputedStyle` (inline-style subset),
-  `structuredClone`, `requestIdleCallback`, plus responsive media behavior.
+- Modern APIs: `matchMedia`, `getComputedStyle` (cascaded subset with
+  `getPropertyValue` and camelCase accessors), `getBoundingClientRect`/
+  `getClientRects`, `structuredClone`, `requestIdleCallback`, plus responsive
+  media behavior.
+- CSS transforms: `translate`/`translateX`/`translateY` and `scale`/`scaleX`/
+  `scaleY` affect layout, paint and hit testing; `rotate()` parses but is not
+  rasterized yet.
 
 **Phase 8 — Optimization and stability** is implemented as a hardening pass:
 
@@ -223,7 +231,7 @@ See "Known limitations" below.
 
 ## Testing
 
-`cargo test` runs 308 tests covering tokenization, malformed HTML recovery, DOM
+`cargo test` runs 311 tests covering tokenization, malformed HTML recovery, DOM
 mutation/selectors/serialization, entities/quirks/templates/foreign content,
 formatting reconstruction, CSS parsing/cascade/variables/media queries,
 `@import`/`@supports`/`calc()`, generated pseudo content, block/inline/flex/
@@ -279,7 +287,9 @@ JavaScript:
 - Event handling supports capture and bubble phases, `once`, `passive`, `on*`
   properties and inline `on*` attributes; there is no event delegation
   emulation beyond normal bubbling, and `document.readyState` is always
-  `complete`. `Element.matches`/`closest` are not exposed.
+  `complete`. `getBoundingClientRect`/`getClientRects` report layout geometry,
+  and `document.cookie` reads/writes the network cookie jar on fetched pages.
+  `Element.matches`/`closest` are not exposed.
 - Timers run during load up to `javascript_max_runtime_ms` (default 2 s);
   very long timeouts are skipped. Animation frames are approximated with a
   16 ms timer.
@@ -300,9 +310,10 @@ CSS:
   containers, but cannot itself be block-level.
 - `calc()` supports linear length expressions (`+`, `-`, `*`, `/`, nested
   parentheses); `min()`/`max()`/`clamp()` are supported in properties and
-  media queries. No transforms, transitions or animations.
-  `getComputedStyle` exposes the inline-style subset rather than the full
-  cascaded computed style.
+  media queries. `translate`/`scale` transforms are applied; `rotate()` parses
+  but is not rasterized, and transitions/animations are not implemented.
+  `getComputedStyle` exposes a cascaded subset rather than every computed
+  property.
 - `@namespace` declarations are parsed and participate in selector matching,
   in addition to the built-in `html`/`svg`/`math`/`*` prefixes.
 - Media queries support width/height (min/max and range syntax with
@@ -388,8 +399,10 @@ Interaction:
   and overlapping fixed/absolute content are approximate.
 - Host-dispatched events report `isTrusted`; script-created events do not.
   Link clicks record and can follow the resolved href, forms submit GET/POST,
-  and Tab/Shift+Tab traverse focus. Pointer hover persists across separate
-  API calls; focus, selection and pending navigation may not.
+  and Tab/Shift+Tab traverse focus. Selector-driven clicks resolve inline
+  elements (links/spans) and follow link/form navigation automatically.
+  Pointer hover persists across separate API calls; focus, selection and
+  pending navigation may not.
 - Hover drives `:hover` styling and JS events; `:focus` does not yet match.
   Keyboard text entry supports input/textarea and contenteditable editing with
   logical selection ranges, but not IME composition.

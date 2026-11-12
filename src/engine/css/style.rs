@@ -7,9 +7,9 @@ use super::values::{
     AlignContent, AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BackgroundSizeMode,
     BorderStyle, BoxSizing, Color, Display, Edges, FlexDirection, FlexWrap, FontStyle,
     GridAutoFlow, GridPlacement, GridTrack, JustifyContent, Length, LineHeight, ListStyleType,
-    Overflow, PaintColor, Position, TextAlign, TextDecoration, Viewport, Visibility, WhiteSpace,
-    expand_four, ident, number, parse_color, parse_font_size_keyword, parse_length, parse_lengths,
-    parse_url, percentage, significant,
+    Overflow, PaintColor, Position, TextAlign, TextDecoration, Transform, Viewport, Visibility,
+    WhiteSpace, expand_four, ident, number, parse_color, parse_font_size_keyword, parse_length,
+    parse_lengths, parse_url, percentage, significant,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -22,6 +22,7 @@ pub enum PropertyId {
     BackgroundRepeat,
     BackgroundSize,
     BackgroundPosition,
+    Transform,
     BorderRadius,
     FontSize,
     FontWeight,
@@ -163,6 +164,7 @@ pub enum PropertyValue {
     Bottom(Length),
     Left(Length),
     ZIndex(i32),
+    Transform(Transform),
     FontFamily(String),
     Content(ContentValue),
 }
@@ -304,6 +306,7 @@ pub struct ComputedStyle {
     pub bottom: Length,
     pub left: Length,
     pub z_index: i32,
+    pub transform: Transform,
     pub font_family: String,
     pub content: Option<String>,
     pub content_parts: Option<ContentValue>,
@@ -382,6 +385,7 @@ impl ComputedStyle {
             bottom: Length::Auto,
             left: Length::Auto,
             z_index: 0,
+            transform: Transform::default(),
             font_family: "sans-serif".to_owned(),
             content: None,
             content_parts: None,
@@ -548,6 +552,7 @@ impl ComputedStyle {
             PropertyValue::Bottom(length) => self.bottom = *length,
             PropertyValue::Left(length) => self.left = *length,
             PropertyValue::ZIndex(z_index) => self.z_index = *z_index,
+            PropertyValue::Transform(transform) => self.transform = *transform,
             PropertyValue::FontFamily(family) => self.font_family = family.clone(),
             PropertyValue::Content(content) => self.content_parts = Some(content.clone()),
         }
@@ -1334,6 +1339,11 @@ pub fn expand_declaration(
                 out.push((PropertyId::ZIndex, PropertyValue::ZIndex(value)));
             }
         }
+        "transform" => {
+            if let Some(transform) = parse_transform(&sig) {
+                out.push((PropertyId::Transform, PropertyValue::Transform(transform)));
+            }
+        }
         "content" => {
             let mut parts = Vec::new();
             let mut none = false;
@@ -1511,13 +1521,110 @@ fn parse_grid_track(value: &ComponentValue) -> Option<GridTrack> {
             Some(GridTrack::MaxContent)
         }
         ComponentValue::Function { name, args } if name.eq_ignore_ascii_case("minmax") => {
-            args.iter().find_map(|arg| match parse_grid_track(arg) {
-                Some(GridTrack::Fr(value)) => Some(GridTrack::Fr(value)),
-                Some(GridTrack::Length(length)) => Some(GridTrack::Length(length)),
-                _ => None,
+            let parts: Vec<&ComponentValue> = args
+                .iter()
+                .filter(|arg| !matches!(arg, ComponentValue::Comma))
+                .collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let min = parse_length(parts[0]).unwrap_or(Length::Auto);
+            let max = parse_grid_track(parts[1])?;
+            Some(GridTrack::MinMax {
+                min,
+                max: Box::new(max),
             })
         }
         _ => parse_length(value).map(GridTrack::Length),
+    }
+}
+
+fn parse_angle(value: &ComponentValue) -> Option<f32> {
+    match value {
+        ComponentValue::Dimension { value, unit } if unit.eq_ignore_ascii_case("deg") => {
+            Some(*value as f32)
+        }
+        ComponentValue::Number(number) => Some(*number as f32),
+        _ => None,
+    }
+}
+
+fn parse_transform(values: &[&ComponentValue]) -> Option<Transform> {
+    let mut transform = Transform::default();
+    let mut any = false;
+    for value in values {
+        match value {
+            ComponentValue::Ident(name) if name.eq_ignore_ascii_case("none") => any = true,
+            ComponentValue::Function { name, args } => {
+                let args: Vec<&ComponentValue> = args
+                    .iter()
+                    .filter(|arg| {
+                        !matches!(arg, ComponentValue::Comma | ComponentValue::Whitespace)
+                    })
+                    .collect();
+                match name.to_ascii_lowercase().as_str() {
+                    "translate" => {
+                        transform.translate_x = args
+                            .first()
+                            .and_then(|value| parse_length(value))
+                            .unwrap_or(Length::Px(0.0));
+                        if let Some(y) = args.get(1) {
+                            transform.translate_y = parse_length(y).unwrap_or(Length::Px(0.0));
+                        }
+                        any = true;
+                    }
+                    "translatex" => {
+                        transform.translate_x = args
+                            .first()
+                            .and_then(|value| parse_length(value))
+                            .unwrap_or(Length::Px(0.0));
+                        any = true;
+                    }
+                    "translatey" => {
+                        transform.translate_y = args
+                            .first()
+                            .and_then(|value| parse_length(value))
+                            .unwrap_or(Length::Px(0.0));
+                        any = true;
+                    }
+                    "scale" => {
+                        let scale = args.first().and_then(|value| number(value)).unwrap_or(1.0);
+                        transform.scale_x = scale;
+                        transform.scale_y =
+                            args.get(1).and_then(|value| number(value)).unwrap_or(scale);
+                        any = true;
+                    }
+                    "scalex" => {
+                        transform.scale_x =
+                            args.first().and_then(|value| number(value)).unwrap_or(1.0);
+                        any = true;
+                    }
+                    "scaley" => {
+                        transform.scale_y =
+                            args.first().and_then(|value| number(value)).unwrap_or(1.0);
+                        any = true;
+                    }
+                    "rotate" => {
+                        transform.rotate_deg = args
+                            .first()
+                            .and_then(|value| parse_angle(value))
+                            .unwrap_or(0.0);
+                        any = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    any.then_some(transform)
+}
+
+fn grid_track_min(track: &GridTrack) -> Length {
+    match track {
+        GridTrack::MinMax { min, .. } => *min,
+        GridTrack::Length(length) => *length,
+        _ => Length::Auto,
     }
 }
 
@@ -1530,14 +1637,29 @@ fn parse_grid_tracks(values: &[&ComponentValue]) -> Option<Vec<GridTrack>> {
                 let mut count = 1usize;
                 let mut inner = Vec::new();
                 let mut count_seen = false;
+                let mut auto_repeat: Option<bool> = None;
                 for arg in args {
                     if matches!(arg, ComponentValue::Comma) {
                         continue;
                     }
-                    if !count_seen && let Some(number) = number(arg) {
-                        count = number.clamp(1.0, 100.0) as usize;
-                        count_seen = true;
-                        continue;
+                    if !count_seen {
+                        if let ComponentValue::Ident(name) = arg {
+                            if name.eq_ignore_ascii_case("auto-fit") {
+                                auto_repeat = Some(false);
+                                count_seen = true;
+                                continue;
+                            }
+                            if name.eq_ignore_ascii_case("auto-fill") {
+                                auto_repeat = Some(true);
+                                count_seen = true;
+                                continue;
+                            }
+                        }
+                        if let Some(number) = number(arg) {
+                            count = number.clamp(1.0, 100.0) as usize;
+                            count_seen = true;
+                            continue;
+                        }
                     }
                     if let Some(track) = parse_grid_track(arg) {
                         inner.push(track);
@@ -1546,8 +1668,17 @@ fn parse_grid_tracks(values: &[&ComponentValue]) -> Option<Vec<GridTrack>> {
                 if inner.is_empty() {
                     return None;
                 }
-                for _ in 0..count {
-                    tracks.extend(inner.iter().cloned());
+                if let Some(fill) = auto_repeat {
+                    let min = inner.first().map(grid_track_min).unwrap_or(Length::Auto);
+                    tracks.push(GridTrack::AutoRepeat {
+                        fill,
+                        min,
+                        tracks: inner,
+                    });
+                } else {
+                    for _ in 0..count {
+                        tracks.extend(inner.iter().cloned());
+                    }
                 }
             }
             _ => tracks.push(parse_grid_track(value)?),

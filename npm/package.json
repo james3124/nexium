@@ -1,6 +1,6 @@
 {
   "name": "nexiumx",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "NexiumX - independent Rust-powered headless browser engine (CLI, REST/MCP server)",
   "license": "MIT",
   "bin": {
