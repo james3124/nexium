@@ -1,3 +1,5 @@
 /target
 /nexium-data
 *.log
+/npm/*.tgz
+/npm/vendor

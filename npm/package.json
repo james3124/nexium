@@ -1,0 +1,38 @@
+{
+  "name": "nexiumx",
+  "version": "0.8.0",
+  "description": "NEXIUM - independent Rust-powered headless browser engine (CLI, REST/MCP server)",
+  "license": "MIT",
+  "bin": {
+    "nexium": "bin/nexium.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "browser",
+    "headless",
+    "rust",
+    "screenshot",
+    "mcp",
+    "mcp-server",
+    "automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/james3124/nexium.git"
+  },
+  "homepage": "https://github.com/james3124/nexium",
+  "bugs": {
+    "url": "https://github.com/james3124/nexium/issues"
+  }
+}

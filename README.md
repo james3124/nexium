@@ -51,6 +51,16 @@ Configuration lives in [config/default.toml](config/default.toml); pass
 `max_tabs`, `block_private_networks` and `no_proxy` configure runtime limits
 and security. Logging uses `RUST_LOG` (tracing).
 
+Through npm (downloads a prebuilt binary from GitHub Releases):
+
+```bash
+npm install --global nexiumx
+nexium https://example.com --dump-dom
+npx nexiumx --mcp      # MCP over stdio
+```
+
+Packaging details and release workflow: [docs/NPM.md](docs/NPM.md).
+
 A self-contained visual demo is available:
 
 ```bash
