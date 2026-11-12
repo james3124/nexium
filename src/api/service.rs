@@ -954,6 +954,9 @@ impl ApiService {
         id: Option<&str>,
         options: EvaluateOptions,
     ) -> ApiResult<Value> {
+        if options.script.trim().is_empty() {
+            return Err(ApiError::bad_request("script must not be empty"));
+        }
         if options.script.len() > 100_000 {
             return Err(ApiError::bad_request("script exceeds 100000 characters"));
         }
