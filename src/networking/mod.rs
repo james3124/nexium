@@ -1,11 +1,15 @@
 //! Networking subsystem.
 
+pub mod bypass;
 pub mod cache;
 pub mod client;
 pub mod compression;
 pub mod cookies;
+pub mod ssrf;
 
-pub use client::{HttpClient, Request, Response};
+pub use bypass::ProxyBypass;
+pub use client::{HttpClient, NetworkEvent, Request, Response};
+pub use cookies::{CookieRecord, SameSite};
 
 use url::Url;
 

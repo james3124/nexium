@@ -29,5 +29,45 @@ cookies_enabled = true
 cache_enabled = true
 cache_max_entries = 128
 
+# Maximum tabs per browser session.
+max_tabs = 64
+
+# Reject localhost/private-network requests (enable for untrusted content).
+block_private_networks = false
+
+# JavaScript execution during page load.
+javascript_enabled = true
+javascript_max_runtime_ms = 2000
+
 # Optional HTTP proxy for outbound requests (HTTP CONNECT tunneling).
 # proxy = "http://127.0.0.1:8080"
+
+# Hosts that connect directly even when a proxy is configured (`no_proxy`).
+# Entries may be hostnames, `.suffix` / `*.wildcard` domains, exact IPs,
+# CIDR ranges (`10.0.0.0/8`, `fd00::/8`), `host:port`, or `*` for everything.
+# When this list is empty the NO_PROXY / no_proxy environment variables are
+# used. Bypass rules are re-evaluated on every redirect hop.
+# no_proxy = ["localhost", "127.0.0.1", ".internal.example"]
+
+# REST/WebSocket/MCP control server.
+api_bind = "127.0.0.1:9222"
+# Native TLS: set cert+key to serve HTTPS instead of HTTP, or add a separate
+# HTTPS bind with api_tls_bind to serve both at once.
+# api_tls_cert = "nexium-data/tls/cert.pem"
+# api_tls_key = "nexium-data/tls/key.pem"
+# api_tls_bind = "127.0.0.1:9443"
+# Set a bearer token before exposing the server beyond localhost.
+# api_token = "change-me"
+# Native TLS termination (both paths required to enable HTTPS):
+# api_tls_cert = "nexium-data/tls/cert.pem"
+# api_tls_key = "nexium-data/tls/key.pem"
+# Additional bearer tokens mapped to fixed agent identities (preferred).
+# api_tokens = [{ token = "change-me", agent = "agent-a" }]
+api_max_sessions = 16
+# Idle sessions are swept when new sessions are created.
+api_session_idle_timeout_ms = 1800000
+# Sliding-window request budgets per agent/session per minute; 0 disables.
+api_rate_limit_per_minute = 600
+api_ws_rate_limit_per_minute = 1200
+# Bounded in-memory audit ring buffer exposed via GET /v1/audit.
+api_audit_capacity = 256

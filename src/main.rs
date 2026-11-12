@@ -23,6 +23,13 @@ OPTIONS:
     --timeout <ms>          Request timeout in milliseconds (default 30000)
     --max-redirects <n>     Redirect limit (default 10)
     --config <path>         Load a TOML configuration file
+    --api                   Run the REST/WebSocket/MCP HTTP control server
+    --mcp                   Run the MCP JSON-RPC server over stdin/stdout
+    --bind <addr>           Control server bind address (default 127.0.0.1:9222)
+    --api-token <token>     Bearer token required by the control server
+    --tls-cert <path>       PEM certificate chain (with --tls-key) for HTTPS
+    --tls-key <path>        PEM private key (with --tls-cert) for HTTPS
+    --tls-bind <addr>       Also serve HTTPS here; --bind stays plain HTTP
     -h, --help              Print this help
     -V, --version           Print the version
 
@@ -31,6 +38,9 @@ EXAMPLES:
     nexium example.com --dump-dom
     nexium https://example.com --screenshot page.png
     nexium https://example.com --screenshot element.png --element \"h1\" --viewport 800x600
+    nexium --api --bind 127.0.0.1:9222 --api-token secret
+    nexium --api --bind 127.0.0.1:9222 --tls-cert cert.pem --tls-key key.pem
+    nexium --mcp
 ";
 
 struct Args {
@@ -46,6 +56,13 @@ struct Args {
     timeout_ms: Option<u64>,
     max_redirects: Option<usize>,
     config_path: Option<String>,
+    api: bool,
+    mcp: bool,
+    bind: Option<String>,
+    api_token: Option<String>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    tls_bind: Option<String>,
 }
 
 impl Args {
@@ -63,6 +80,13 @@ impl Args {
             timeout_ms: None,
             max_redirects: None,
             config_path: None,
+            api: false,
+            mcp: false,
+            bind: None,
+            api_token: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_bind: None,
         };
 
         let mut iter = raw.into_iter();
@@ -129,6 +153,28 @@ impl Args {
                     let value = iter.next().ok_or("--config requires a value")?;
                     args.config_path = Some(value);
                 }
+                "--api" => args.api = true,
+                "--mcp" => args.mcp = true,
+                "--bind" => {
+                    let value = iter.next().ok_or("--bind requires a value")?;
+                    args.bind = Some(value);
+                }
+                "--api-token" => {
+                    let value = iter.next().ok_or("--api-token requires a value")?;
+                    args.api_token = Some(value);
+                }
+                "--tls-cert" => {
+                    let value = iter.next().ok_or("--tls-cert requires a value")?;
+                    args.tls_cert = Some(value);
+                }
+                "--tls-key" => {
+                    let value = iter.next().ok_or("--tls-key requires a value")?;
+                    args.tls_key = Some(value);
+                }
+                "--tls-bind" => {
+                    let value = iter.next().ok_or("--tls-bind requires a value")?;
+                    args.tls_bind = Some(value);
+                }
                 other if other.starts_with('-') => {
                     return Err(format!("unknown option: {other}"));
                 }
@@ -166,13 +212,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(url) = args.url else {
-        eprintln!("nexium: a URL is required\n\n{HELP}");
-        std::process::exit(2);
-    };
+    if args.api && args.mcp {
+        return Err("choose either --api or --mcp".into());
+    }
 
     let config_path = args
         .config_path
+        .clone()
         .unwrap_or_else(|| "config/default.toml".to_owned());
     let mut config = Config::load_or_default(Path::new(&config_path))?;
     if let Some(timeout) = args.timeout_ms {
@@ -185,6 +231,37 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         config.viewport_width = width;
         config.viewport_height = height;
     }
+    if let Some(bind) = args.bind.clone() {
+        config.api_bind = bind;
+    }
+    if let Some(token) = args.api_token.clone() {
+        config.api_token = Some(token);
+    }
+    if let Some(cert) = args.tls_cert.clone() {
+        config.api_tls_cert = Some(cert.into());
+    }
+    if let Some(key) = args.tls_key.clone() {
+        config.api_tls_key = Some(key.into());
+    }
+    if let Some(bind) = args.tls_bind.clone() {
+        config.api_tls_bind = Some(bind);
+    }
+
+    if args.mcp {
+        let service = nexium::ApiService::new(config);
+        nexium::mcp::run_stdio(service).await?;
+        return Ok(());
+    }
+    if args.api {
+        nexium::serve_api(config).await?;
+        return Ok(());
+    }
+
+    let Some(url) = args.url else {
+        eprintln!("nexium: a URL is required\n\n{HELP}");
+        std::process::exit(2);
+    };
+
     let viewport = Viewport {
         width: config.viewport_width as f32,
         height: config.viewport_height as f32,
@@ -258,6 +335,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let excerpt: String = text.chars().take(600).collect();
 
     if args.json {
+        let console: Vec<serde_json::Value> = page
+            .console
+            .iter()
+            .map(|message| {
+                serde_json::json!({
+                    "level": message.level,
+                    "text": message.text,
+                })
+            })
+            .collect();
         let summary = serde_json::json!({
             "url": page.url.as_str(),
             "status": page.status.as_u16(),
@@ -266,6 +353,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "charset": page.charset,
             "elements": page.document.element_count(),
             "nodes": page.document.node_count(),
+            "console": console,
+            "script_errors": page.script_errors,
             "text": text.chars().take(2000).collect::<String>(),
         });
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -286,6 +375,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     println!("Charset:   {}", page.charset);
     println!("Elements:  {}", page.document.element_count());
     println!("Nodes:     {}", page.document.node_count());
+    if !page.script_errors.is_empty() {
+        println!("Scripts:   {} error(s)", page.script_errors.len());
+        for error in page.script_errors.iter().take(3) {
+            println!("  {error}");
+        }
+    }
     if !excerpt.is_empty() {
         println!(
             "Text:\n{excerpt}{}",

@@ -1,13 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use encoding_rs::Encoding;
 use hyper::StatusCode;
+use image::RgbaImage;
 use tracing::warn;
 use url::Url;
 
 use crate::engine::css::{MediaRule, Rule, Stylesheet, parse_stylesheet};
 use crate::engine::dom::{Document, DomError, NodeId};
 use crate::engine::html::parse_html;
+use crate::engine::javascript::{ConsoleMessage, ScriptSession};
 use crate::networking::{HttpClient, Request, Response};
 use crate::utils::Result;
 
@@ -15,7 +18,7 @@ const ACCEPT_HTML: &str = "text/html,application/xhtml+xml,application/xml;q=0.9
 const ACCEPT_CSS: &str = "text/css,*/*;q=0.1";
 
 /// A loaded page: response metadata, parsed DOM and author stylesheets.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Page {
     pub url: Url,
     pub status: StatusCode,
@@ -23,17 +26,40 @@ pub struct Page {
     pub charset: String,
     pub body_len: usize,
     pub is_binary: bool,
+    pub console: Vec<ConsoleMessage>,
+    pub script_errors: Vec<String>,
     pub document: Document,
     pub stylesheets: Vec<Stylesheet>,
+    pub canvases: HashMap<NodeId, RgbaImage>,
+    script_session: Option<Arc<ScriptSession>>,
 }
 
 impl Page {
     pub async fn load(client: &HttpClient, url: Url) -> Result<Self> {
         let request = Request::get(url).header("Accept", ACCEPT_HTML)?;
+        Self::load_request(client, request).await
+    }
+
+    /// Load a page from a prepared request (used for link following and form
+    /// submission navigation, which may need a POST body).
+    pub async fn load_request(client: &HttpClient, request: Request) -> Result<Self> {
         let response = client.fetch(request).await?;
         let mut page = Self::from_response(response);
         page.stylesheets = load_linked_stylesheets(client, &page.document, &page.url).await;
         Ok(page)
+    }
+
+    /// Build a top-level navigation request for `url`: an HTML GET, or a
+    /// form-encoded POST when `method` is `post`.
+    pub fn navigation_request(url: Url, method: &str, body: Option<&str>) -> Result<Request> {
+        if method.eq_ignore_ascii_case("post") {
+            Ok(Request::new(hyper::Method::POST, url)
+                .header("Accept", ACCEPT_HTML)?
+                .header("Content-Type", "application/x-www-form-urlencoded")?
+                .body(body.unwrap_or_default().to_owned()))
+        } else {
+            Ok(Request::get(url).header("Accept", ACCEPT_HTML)?)
+        }
     }
 
     pub fn from_response(response: Response) -> Self {
@@ -64,8 +90,12 @@ impl Page {
             charset,
             body_len,
             is_binary,
+            console: Vec::new(),
+            script_errors: Vec::new(),
             document,
             stylesheets,
+            canvases: HashMap::new(),
+            script_session: None,
         }
     }
 
@@ -80,9 +110,36 @@ impl Page {
             charset: "UTF-8".to_owned(),
             body_len: html.len(),
             is_binary: false,
+            console: Vec::new(),
+            script_errors: Vec::new(),
             document,
             stylesheets,
+            canvases: HashMap::new(),
+            script_session: None,
         }
+    }
+
+    pub fn has_script_runtime(&self) -> bool {
+        self.script_session.is_some()
+    }
+
+    pub(crate) fn script_session(&self) -> Option<Arc<ScriptSession>> {
+        self.script_session.clone()
+    }
+
+    pub(crate) fn set_script_session(&mut self, session: Option<Arc<ScriptSession>>) {
+        self.script_session = session;
+    }
+
+    pub(crate) fn apply_session_snapshot(
+        &mut self,
+        result: crate::engine::javascript::ScriptRunResult,
+        document: Document,
+    ) {
+        self.document = document;
+        self.console = result.console;
+        self.script_errors = result.errors;
+        self.canvases = result.canvases;
     }
 
     pub fn title(&self) -> Option<String> {
@@ -253,8 +310,12 @@ fn expand_imports<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Stylesheet> + Send + 'a>> {
     Box::pin(async move {
         if depth >= 8 {
-            return Stylesheet { rules: Vec::new() };
+            return Stylesheet {
+                rules: Vec::new(),
+                namespaces: Vec::new(),
+            };
         }
+        let namespaces = sheet.namespaces;
         let mut rules = Vec::new();
         for rule in sheet.rules {
             match rule {
@@ -284,7 +345,7 @@ fn expand_imports<'a>(
                 other => rules.push(other),
             }
         }
-        Stylesheet { rules }
+        Stylesheet { rules, namespaces }
     })
 }
 

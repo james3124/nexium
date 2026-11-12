@@ -3,7 +3,9 @@
 //! A pragmatic subset of the WHATWG tree construction algorithm: implied
 //! `html`/`head`/`body`, void elements, RCDATA/RAWTEXT handling, common
 //! auto-closing rules (`p`, list items, table cells, options, headings) and
-//! forgiving handling of mismatched end tags.
+//! forgiving handling of mismatched end tags. Mismatched formatting elements
+//! are repaired with the adoption agency algorithm, including its inner
+//! re-parenting loop and the re-wrapping of block content.
 
 use std::borrow::Cow;
 
@@ -698,12 +700,19 @@ impl<'a> Parser<'a> {
                 self.insert_element_and_push(token);
             }
             "a" => {
-                if self
-                    .stack
-                    .iter()
-                    .any(|&id| self.doc.tag_name(id) == Some("a"))
-                {
+                // The spec keys this off the list of active formatting
+                // elements rather than the stack of open elements.
+                if let Some(stale) = self.last_formatting_with_name("a") {
+                    let stale = self.formatting_node_at(stale);
                     self.adoption_agency_end("a");
+                    if let Some(node) = stale {
+                        self.remove_formatting_node(node);
+                        if let Some(index) = self.stack.iter().position(|&id| id == node)
+                            && index > 0
+                        {
+                            self.stack.remove(index);
+                        }
+                    }
                 }
                 self.insert_element_and_push(token);
                 let node = self.current();
@@ -716,6 +725,7 @@ impl<'a> Parser<'a> {
                     .any(|&id| self.doc.tag_name(id) == Some("nobr"))
                 {
                     self.adoption_agency_end("nobr");
+                    self.reconstruct_formatting();
                 }
                 self.insert_element_and_push(token);
                 let node = self.current();
@@ -805,10 +815,54 @@ impl<'a> Parser<'a> {
         });
     }
 
-    fn remove_active_formatting(&mut self, name: &str) {
-        if let Some(position) = self.active_formatting.iter().rposition(|entry| {
-            matches!(entry, ActiveFormatting::Element { name: entry_name, .. } if entry_name == name)
-        }) {
+    /// Index of the first active formatting entry that is in scope for end-tag
+    /// matching, i.e. the entry after the last marker (or 0 when none exists).
+    fn formatting_window_start(&self) -> usize {
+        self.active_formatting
+            .iter()
+            .rposition(|entry| matches!(entry, ActiveFormatting::Marker))
+            .map_or(0, |index| index + 1)
+    }
+
+    /// Last active formatting entry with the given tag name inside the current
+    /// marker-delimited window.
+    fn last_formatting_with_name(&self, name: &str) -> Option<usize> {
+        let start = self.formatting_window_start();
+        (start..self.active_formatting.len()).rev().find(|&index| {
+            matches!(
+                &self.active_formatting[index],
+                ActiveFormatting::Element { name: entry_name, .. } if entry_name == name
+            )
+        })
+    }
+
+    /// Position of the active formatting entry that owns `node`, if any.
+    fn formatting_position_of(&self, node: NodeId) -> Option<usize> {
+        self.active_formatting.iter().position(
+            |entry| matches!(entry, ActiveFormatting::Element { node: entry_node, .. } if *entry_node == node),
+        )
+    }
+
+    fn formatting_node_at(&self, index: usize) -> Option<NodeId> {
+        match self.active_formatting.get(index) {
+            Some(ActiveFormatting::Element { node, .. }) => Some(*node),
+            _ => None,
+        }
+    }
+
+    fn formatting_snapshot(&self, index: usize) -> Option<(NodeId, String, Vec<Attribute>)> {
+        match self.active_formatting.get(index) {
+            Some(ActiveFormatting::Element {
+                node,
+                name,
+                attributes,
+            }) => Some((*node, name.clone(), attributes.clone())),
+            _ => None,
+        }
+    }
+
+    fn remove_formatting_node(&mut self, node: NodeId) {
+        if let Some(position) = self.formatting_position_of(node) {
             self.active_formatting.remove(position);
         }
     }
@@ -823,14 +877,7 @@ impl<'a> Parser<'a> {
 
     /// Re-open active formatting elements that are no longer on the stack.
     fn reconstruct_formatting(&mut self) {
-        let start = match self
-            .active_formatting
-            .iter()
-            .rposition(|entry| matches!(entry, ActiveFormatting::Marker))
-        {
-            Some(index) => index + 1,
-            None => 0,
-        };
+        let start = self.formatting_window_start();
         for index in start..self.active_formatting.len() {
             let (node, name, attributes) = match &self.active_formatting[index] {
                 ActiveFormatting::Element {
@@ -853,66 +900,187 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Pragmatic adoption agency: handles common misnesting, detaching a
-    /// formatting element from an open block.
-    fn adoption_agency_end(&mut self, name: &str) -> bool {
-        if self.doc.tag_name(self.current()) == Some(name) {
+    /// Insert `node` at the "appropriate place for inserting a node" relative to
+    /// `target`, foster-parenting when the target is a table or table section.
+    fn append_at_appropriate_place(&mut self, target: NodeId, node: NodeId) {
+        let target_is_table_ish = self
+            .doc
+            .tag_name(target)
+            .is_some_and(|name| matches!(name, "table" | "tbody" | "tfoot" | "thead" | "tr"));
+        if target_is_table_ish {
+            let mut anchor = Some(target);
+            let mut table = None;
+            while let Some(id) = anchor {
+                if self.doc.tag_name(id) == Some("table") {
+                    table = Some(id);
+                    break;
+                }
+                anchor = self.doc.parent(id);
+            }
+            if let Some(table) = table
+                && let Some(parent) = self.doc.parent(table)
+                && self.doc.insert_before(parent, node, Some(table)).is_ok()
+            {
+                return;
+            }
+        }
+        let _ = self.doc.append_child(target, node);
+    }
+
+    /// The WHATWG adoption agency algorithm for formatting end tags.
+    ///
+    /// Walks the marker-delimited list of active formatting elements looking
+    /// for the most recent `subject` entry, then repairs the tree: the run of
+    /// formatting elements between the entry and the nearest enclosing block
+    /// (the "furthest block") is reparented under the common ancestor, the
+    /// block's contents are re-wrapped in a clone of the formatting element and
+    /// both the stack and the formatting list are patched up. The outer loop
+    /// repeats (up to the spec's eight iterations) so that clones left on the
+    /// stack by one pass are processed by the next.
+    ///
+    /// Returns `false` when no matching formatting element exists, so callers
+    /// can fall back to the generic "any other end tag" handling.
+    fn adoption_agency_end(&mut self, subject: &str) -> bool {
+        // Step 2: the current node is the subject and nothing tracks it.
+        let current = self.current();
+        if self.doc.tag_name(current) == Some(subject)
+            && self.formatting_position_of(current).is_none()
+        {
             self.stack.pop();
-            self.remove_active_formatting(name);
             return true;
         }
-        let Some(position) = self.active_formatting.iter().rposition(|entry| {
-            matches!(entry, ActiveFormatting::Element { name: entry_name, .. } if entry_name == name)
-        }) else {
-            return false;
-        };
-        let (formatting_node, formatting_name, formatting_attributes) =
-            match &self.active_formatting[position] {
-                ActiveFormatting::Element {
-                    node,
-                    name,
-                    attributes,
-                } => (*node, name.clone(), attributes.clone()),
-                ActiveFormatting::Marker => return false,
-            };
-        let Some(stack_index) = self.stack.iter().rposition(|&id| id == formatting_node) else {
-            self.active_formatting.remove(position);
-            return true;
-        };
 
-        let furthest_block = (stack_index + 1..self.stack.len()).find(|&index| {
-            self.doc
-                .tag_name(self.stack[index])
-                .is_some_and(is_special_element)
-        });
-        if let Some(block_index) = furthest_block {
-            let block = self.stack[block_index];
-            if let Some(parent) = self.doc.parent(formatting_node) {
-                let siblings: Vec<NodeId> = self.doc.children(parent).to_vec();
-                let formatting_position = siblings.iter().position(|&id| id == formatting_node);
-                let next_sibling =
-                    formatting_position.and_then(|index| siblings.get(index + 1).copied());
-                let _ = self.doc.remove_child(formatting_node, block);
-                let _ = self.doc.insert_before(parent, block, next_sibling);
+        let mut outer_loop_counter = 0;
+        while outer_loop_counter < 8 {
+            outer_loop_counter += 1;
+
+            // Step 4.3: most recent matching formatting element, ignoring the
+            // ones before the last marker.
+            let Some(position) = self.last_formatting_with_name(subject) else {
+                return false;
+            };
+            let Some((formatting_node, formatting_name, formatting_attributes)) =
+                self.formatting_snapshot(position)
+            else {
+                return false;
+            };
+            // Step 4.4: the formatting element closed earlier; drop the entry.
+            let Some(stack_index) = self.stack.iter().rposition(|&id| id == formatting_node) else {
+                self.active_formatting.remove(position);
+                return true;
+            };
+            // Step 4.5 (scope) is approximated by "still on the stack".
+            if stack_index == 0 {
+                self.active_formatting.remove(position);
+                return true;
             }
-            // Re-wrap the block's existing content in a clone of the
-            // formatting element, approximating the adoption agency loop.
+            // Step 4.7: the first special element below the formatting element.
+            let furthest_block_index = (stack_index + 1..self.stack.len()).find(|&index| {
+                self.doc.element(self.stack[index]).is_some_and(|element| {
+                    element.namespace == Namespace::Html && is_special_element(&element.name)
+                })
+            });
+            let Some(block_index) = furthest_block_index else {
+                // Step 4.8: close the formatting element and everything above.
+                self.stack.truncate(stack_index);
+                self.active_formatting.remove(position);
+                return true;
+            };
+
+            let furthest_block = self.stack[block_index];
+            let common_ancestor = self.stack[stack_index - 1];
+            let mut bookmark = position;
+            let mut bookmark_moved = false;
+
+            // Steps 4.11 - 4.18: rebuild the chain of formatting elements
+            // between the furthest block and the formatting element.
+            let mut last_node = furthest_block;
+            let mut node_index = block_index;
+            let mut inner_loop_counter = 0;
+            loop {
+                if node_index == 0 {
+                    break;
+                }
+                node_index -= 1;
+                let node = self.stack[node_index];
+                if node == formatting_node {
+                    break;
+                }
+                inner_loop_counter += 1;
+                if inner_loop_counter > 3
+                    && let Some(tracked) = self.formatting_position_of(node)
+                {
+                    self.active_formatting.remove(tracked);
+                    if tracked < bookmark {
+                        bookmark -= 1;
+                    }
+                }
+                let Some(tracked) = self.formatting_position_of(node) else {
+                    // Not a formatting element: it does not survive the move.
+                    self.stack.remove(node_index);
+                    continue;
+                };
+                let Some((_, node_name, node_attributes)) = self.formatting_snapshot(tracked)
+                else {
+                    self.stack.remove(node_index);
+                    continue;
+                };
+                let clone = self
+                    .doc
+                    .create_element_with_attributes(&node_name, node_attributes);
+                self.stack[node_index] = clone;
+                if let Some(ActiveFormatting::Element { node, .. }) =
+                    self.active_formatting.get_mut(tracked)
+                {
+                    *node = clone;
+                }
+                if !bookmark_moved {
+                    bookmark = tracked + 1;
+                    bookmark_moved = true;
+                }
+                let _ = self.doc.append_child(clone, last_node);
+                last_node = clone;
+            }
+
+            // Steps 4.19 - 4.23: move the rebuilt chain to the common ancestor.
+            self.append_at_appropriate_place(common_ancestor, last_node);
+
+            // Steps 4.24 - 4.30: re-wrap the furthest block's content in a
+            // fresh clone of the formatting element.
             let clone = self
                 .doc
-                .create_element_with_attributes(&formatting_name, formatting_attributes);
-            let existing_children: Vec<NodeId> = self.doc.children(block).to_vec();
-            let _ = self.doc.append_child(block, clone);
-            for child in existing_children {
-                let _ = self.doc.remove_child(block, child);
+                .create_element_with_attributes(&formatting_name, formatting_attributes.clone());
+            let block_children: Vec<NodeId> = self.doc.children(furthest_block).to_vec();
+            for child in block_children {
                 let _ = self.doc.append_child(clone, child);
             }
-            self.stack.remove(stack_index);
-            self.active_formatting.remove(position);
-            return true;
-        }
+            let _ = self.doc.append_child(furthest_block, clone);
 
-        self.stack.truncate(stack_index);
-        self.active_formatting.remove(position);
+            // Step 4.25: the clone replaces the formatting entry in the list.
+            if let Some(index) = self.formatting_position_of(formatting_node) {
+                if index < bookmark {
+                    bookmark -= 1;
+                }
+                self.active_formatting.remove(index);
+            }
+            let bookmark = bookmark.min(self.active_formatting.len());
+            self.active_formatting.insert(
+                bookmark,
+                ActiveFormatting::Element {
+                    node: clone,
+                    name: formatting_name,
+                    attributes: formatting_attributes,
+                },
+            );
+
+            // Step 4.26: and takes its place just below the furthest block.
+            if let Some(index) = self.stack.iter().position(|&id| id == formatting_node) {
+                self.stack.remove(index);
+            }
+            if let Some(index) = self.stack.iter().position(|&id| id == furthest_block) {
+                self.stack.insert(index + 1, clone);
+            }
+        }
         true
     }
 
@@ -1298,49 +1466,87 @@ fn is_special_element(name: &str) -> bool {
         name,
         "address"
             | "applet"
+            | "area"
             | "article"
             | "aside"
+            | "base"
+            | "basefont"
+            | "bgsound"
             | "blockquote"
+            | "body"
+            | "br"
             | "button"
             | "caption"
             | "center"
+            | "col"
+            | "colgroup"
+            | "dd"
             | "details"
             | "dir"
             | "div"
             | "dl"
+            | "dt"
+            | "embed"
             | "fieldset"
             | "figcaption"
             | "figure"
             | "footer"
             | "form"
+            | "frame"
+            | "frameset"
             | "h1"
             | "h2"
             | "h3"
             | "h4"
             | "h5"
             | "h6"
+            | "head"
             | "header"
             | "hgroup"
             | "hr"
+            | "html"
             | "iframe"
+            | "img"
+            | "input"
+            | "keygen"
             | "li"
+            | "link"
+            | "listing"
             | "main"
             | "marquee"
             | "menu"
+            | "meta"
             | "nav"
+            | "noembed"
+            | "noframes"
+            | "noscript"
             | "object"
             | "ol"
             | "p"
+            | "param"
+            | "plaintext"
             | "pre"
+            | "script"
+            | "search"
             | "section"
+            | "select"
+            | "source"
+            | "style"
+            | "summary"
             | "table"
             | "tbody"
             | "td"
+            | "template"
+            | "textarea"
             | "tfoot"
             | "th"
             | "thead"
+            | "title"
             | "tr"
+            | "track"
             | "ul"
+            | "wbr"
+            | "xmp"
     )
 }
 

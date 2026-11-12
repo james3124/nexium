@@ -65,8 +65,11 @@ fn write_node(doc: &Document, id: NodeId, out: &mut String, in_rawtext: bool) {
         NodeData::Element(el) => {
             let _ = write!(out, "<{}", el.name);
             for attr in &el.attributes {
+                // Qualified names are serialized verbatim so foreign attribute
+                // namespaces survive a parse -> serialize round-trip
+                // (`xlink:href`, `xml:space`, `xmlns:xlink`).
                 out.push(' ');
-                out.push_str(&attr.name);
+                out.push_str(attr.qualified_name());
                 out.push_str("=\"");
                 escape_attr_into(&attr.value, out);
                 out.push('"');

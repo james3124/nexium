@@ -1,7 +1,8 @@
 //! CSS selector parsing and matching for DOM queries and the style engine.
 //!
 //! Supported: type/universal selectors, `#id`, `.class`, attribute selectors
-//! (`[attr]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`), descendant (` `), child
+//! (`[attr]`, `[ns|attr]`, `[*|attr]`, `[|attr]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`),
+//! descendant (` `), child
 //! (`>`), adjacent-sibling (`+`) and general-sibling (`~`) combinators,
 //! selector lists (`,`), and the pseudo-classes `:first-child`,
 //! `:last-child`, `:only-child`, `:root`, `:empty`, `:link`, `:checked`,
@@ -10,7 +11,7 @@
 //! Unsupported/dynamic pseudo-classes (e.g. `:hover`) parse successfully but
 //! never match; rules using pseudo-elements match nothing.
 
-use super::{Document, DomError, Namespace, NodeId};
+use super::{AttributeNamespace, Document, DomError, Namespace, NodeId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Combinator {
@@ -31,8 +32,38 @@ pub enum AttributeOp {
     Substring,
 }
 
+/// Attribute namespace prefix in a selector (`[xlink|href]`, `[*|href]`,
+/// `[|href]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttributeNamespaceSelector {
+    /// `*|attr` — any namespace, including none.
+    Any,
+    /// `|attr` — attributes outside any namespace.
+    NoNamespace,
+    /// `xlink|attr`.
+    XLink,
+    /// `xml|attr`.
+    Xml,
+    /// `xmlns|attr`.
+    Xmlns,
+}
+
+impl AttributeNamespaceSelector {
+    fn namespace(self) -> Option<AttributeNamespace> {
+        match self {
+            AttributeNamespaceSelector::Any | AttributeNamespaceSelector::NoNamespace => None,
+            AttributeNamespaceSelector::XLink => Some(AttributeNamespace::XLink),
+            AttributeNamespaceSelector::Xml => Some(AttributeNamespace::Xml),
+            AttributeNamespaceSelector::Xmlns => Some(AttributeNamespace::Xmlns),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttributeSelector {
+    /// Attribute namespace prefix; `None` means an unprefixed selector, which
+    /// keeps matching by qualified name (existing behaviour).
+    pub namespace: Option<AttributeNamespaceSelector>,
     pub name: String,
     pub op: AttributeOp,
     pub value: String,
@@ -46,6 +77,39 @@ pub enum NamespaceSelector {
     Svg,
     MathMl,
     NoNamespace,
+    /// Namespace prefix declared in `@namespace` with a URL that maps to no
+    /// element namespace known to the engine; such selectors never match.
+    Never,
+}
+
+/// Namespace bindings in effect while parsing a stylesheet's selectors.
+#[derive(Clone, Copy)]
+struct NamespaceContext<'a> {
+    /// Prefixes declared with `@namespace prefix url(...)`.
+    prefixes: &'a [(String, NamespaceSelector)],
+    /// Default namespace declared with `@namespace url(...)`.
+    default: Option<NamespaceSelector>,
+}
+
+const NO_NAMESPACES: NamespaceContext<'static> = NamespaceContext {
+    prefixes: &[],
+    default: None,
+};
+
+impl NamespaceContext<'_> {
+    fn resolve(&self, prefix: &str) -> Option<NamespaceSelector> {
+        let lower = prefix.to_ascii_lowercase();
+        if let Some((_, selector)) = self.prefixes.iter().find(|(name, _)| *name == lower) {
+            return Some(*selector);
+        }
+        match lower.as_str() {
+            "*" => Some(NamespaceSelector::Any),
+            "html" => Some(NamespaceSelector::Html),
+            "svg" => Some(NamespaceSelector::Svg),
+            "math" | "mathml" => Some(NamespaceSelector::MathMl),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +140,7 @@ pub enum PseudoClass {
     Empty,
     Link,
     Checked,
+    Hover,
     NthChild(Nth),
     NthLastChild(Nth),
     Not(Vec<ComplexSelector>),
@@ -137,10 +202,29 @@ impl ComplexSelector {
 }
 
 pub fn parse_selector_list(input: &str) -> Result<Vec<ComplexSelector>, DomError> {
+    parse_selector_list_ctx(input, &NO_NAMESPACES)
+}
+
+/// Parse a selector list resolving namespace prefixes declared in a stylesheet
+/// with `@namespace`. `prefixes` maps lowercased prefixes to namespaces and
+/// `default` is the stylesheet's default namespace, applied to unprefixed type
+/// selectors.
+pub fn parse_selector_list_with_namespaces(
+    input: &str,
+    prefixes: &[(String, NamespaceSelector)],
+    default: Option<NamespaceSelector>,
+) -> Result<Vec<ComplexSelector>, DomError> {
+    parse_selector_list_ctx(input, &NamespaceContext { prefixes, default })
+}
+
+fn parse_selector_list_ctx(
+    input: &str,
+    ctx: &NamespaceContext,
+) -> Result<Vec<ComplexSelector>, DomError> {
     let groups = split_groups(input)?;
     let mut out = Vec::with_capacity(groups.len());
     for group in groups {
-        out.push(parse_complex(group.trim())?);
+        out.push(parse_complex(group.trim(), ctx)?);
     }
     if out.is_empty() {
         return Err(DomError::InvalidSelector(input.to_owned()));
@@ -196,7 +280,7 @@ fn split_groups(input: &str) -> Result<Vec<&str>, DomError> {
     Ok(groups)
 }
 
-fn parse_complex(input: &str) -> Result<ComplexSelector, DomError> {
+fn parse_complex(input: &str, ctx: &NamespaceContext) -> Result<ComplexSelector, DomError> {
     let invalid = || DomError::InvalidSelector(input.to_owned());
     if input.is_empty() {
         return Err(invalid());
@@ -233,7 +317,7 @@ fn parse_complex(input: &str) -> Result<ComplexSelector, DomError> {
             continue;
         }
 
-        let (compound, next) = parse_compound(&chars, i, input)?;
+        let (compound, next) = parse_compound(&chars, i, input, ctx)?;
         i = next;
         if parts.is_empty() {
             parts.push((Combinator::Descendant, compound));
@@ -254,6 +338,7 @@ fn parse_compound(
     chars: &[char],
     start: usize,
     original: &str,
+    ctx: &NamespaceContext,
 ) -> Result<(CompoundSelector, usize), DomError> {
     let invalid = || DomError::InvalidSelector(original.to_owned());
     let mut i = start;
@@ -270,7 +355,7 @@ fn parse_compound(
     } else if i < chars.len() && is_ident_start(chars[i]) {
         let (name, next) = read_ident(chars, i);
         if chars.get(next) == Some(&'|') {
-            compound.namespace = Some(parse_namespace_prefix(&name).ok_or_else(invalid)?);
+            compound.namespace = Some(ctx.resolve(&name).ok_or_else(invalid)?);
             i = next + 1;
         } else {
             compound.tag = Some(name);
@@ -295,6 +380,9 @@ fn parse_compound(
         if i < chars.len() && chars[i] == '*' {
             i += 1;
             consumed = true;
+            // An explicit universal selector is also resolved in the default
+            // namespace; an implied universal (`.class`) is not.
+            compound.namespace = ctx.default;
         } else if i < chars.len() && is_ident_start(chars[i]) {
             let (name, next) = read_ident(chars, i);
             compound.tag = Some(name);
@@ -332,7 +420,7 @@ fn parse_compound(
                 consumed = true;
             }
             ':' => {
-                let (pseudo, next) = parse_pseudo(chars, i, original)?;
+                let (pseudo, next) = parse_pseudo(chars, i, original, ctx)?;
                 match pseudo {
                     ParsedPseudo::Class(class) => compound.pseudo_classes.push(class),
                     ParsedPseudo::Element(name) => compound.pseudo_element = Some(name),
@@ -347,6 +435,11 @@ fn parse_compound(
     if !consumed {
         return Err(invalid());
     }
+    // An unprefixed type selector is interpreted in the stylesheet's default
+    // namespace (`@namespace url(...)`), if one was declared.
+    if compound.namespace.is_none() && compound.tag.is_some() {
+        compound.namespace = ctx.default;
+    }
     Ok((compound, i))
 }
 
@@ -359,6 +452,7 @@ fn parse_pseudo(
     chars: &[char],
     start: usize,
     original: &str,
+    ctx: &NamespaceContext,
 ) -> Result<(ParsedPseudo, usize), DomError> {
     let invalid = || DomError::InvalidSelector(original.to_owned());
     let mut i = start + 1; // skip ':'
@@ -382,7 +476,7 @@ fn parse_pseudo(
         i = next;
         let class = match name.as_str() {
             "not" => {
-                let list = parse_selector_list(inner.trim())?;
+                let list = parse_selector_list_ctx(inner.trim(), ctx)?;
                 PseudoClass::Not(list)
             }
             "nth-child" => PseudoClass::NthChild(parse_nth(&inner).ok_or_else(invalid)?),
@@ -400,6 +494,7 @@ fn parse_pseudo(
         "empty" => PseudoClass::Empty,
         "link" | "any-link" => PseudoClass::Link,
         "checked" => PseudoClass::Checked,
+        "hover" => PseudoClass::Hover,
         _ => PseudoClass::Never,
     };
     Ok((ParsedPseudo::Class(class), i))
@@ -480,11 +575,45 @@ fn parse_attribute_selector(
     while i < chars.len() && chars[i].is_whitespace() {
         i += 1;
     }
-    let (name, next) = read_ident(chars, i);
-    if name.is_empty() {
-        return Err(invalid());
+
+    // Optional attribute namespace prefix: `ns|attr`, `*|attr` or `|attr`.
+    // A `|` followed by `=` is the dash-match operator, not a namespace.
+    let is_namespace_bar =
+        |index: usize| chars.get(index) == Some(&'|') && chars.get(index + 1) != Some(&'=');
+    let mut namespace = None;
+    let mut name = String::new();
+    if i < chars.len() && chars[i] == '*' && is_namespace_bar(i + 1) {
+        namespace = Some(AttributeNamespaceSelector::Any);
+        i += 2;
+    } else if i < chars.len() && is_namespace_bar(i) {
+        namespace = Some(AttributeNamespaceSelector::NoNamespace);
+        i += 1;
+    } else {
+        let (first, next) = read_ident(chars, i);
+        if first.is_empty() {
+            return Err(invalid());
+        }
+        i = next;
+        if is_namespace_bar(i) {
+            namespace = Some(parse_attribute_namespace_prefix(&first).ok_or_else(invalid)?);
+            i += 1;
+        } else {
+            name = first;
+        }
     }
-    i = next;
+
+    if namespace.is_some() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        let (local, next) = read_ident(chars, i);
+        if local.is_empty() {
+            return Err(invalid());
+        }
+        name = local;
+        i = next;
+    }
+
     while i < chars.len() && chars[i].is_whitespace() {
         i += 1;
     }
@@ -492,6 +621,7 @@ fn parse_attribute_selector(
     if i < chars.len() && chars[i] == ']' {
         return Ok((
             AttributeSelector {
+                namespace,
                 name: name.to_ascii_lowercase(),
                 op: AttributeOp::Exists,
                 value: String::new(),
@@ -578,6 +708,7 @@ fn parse_attribute_selector(
 
     Ok((
         AttributeSelector {
+            namespace,
             name: name.to_ascii_lowercase(),
             op,
             value,
@@ -587,12 +718,11 @@ fn parse_attribute_selector(
     ))
 }
 
-fn parse_namespace_prefix(prefix: &str) -> Option<NamespaceSelector> {
+fn parse_attribute_namespace_prefix(prefix: &str) -> Option<AttributeNamespaceSelector> {
     match prefix.to_ascii_lowercase().as_str() {
-        "*" => Some(NamespaceSelector::Any),
-        "html" => Some(NamespaceSelector::Html),
-        "svg" => Some(NamespaceSelector::Svg),
-        "math" | "mathml" => Some(NamespaceSelector::MathMl),
+        "xlink" => Some(AttributeNamespaceSelector::XLink),
+        "xml" => Some(AttributeNamespaceSelector::Xml),
+        "xmlns" => Some(AttributeNamespaceSelector::Xmlns),
         _ => None,
     }
 }
@@ -731,7 +861,7 @@ fn compound_matches(doc: &Document, id: NodeId, compound: &CompoundSelector) -> 
         Some(NamespaceSelector::Html) => element.namespace == Namespace::Html,
         Some(NamespaceSelector::Svg) => element.namespace == Namespace::Svg,
         Some(NamespaceSelector::MathMl) => element.namespace == Namespace::MathMl,
-        Some(NamespaceSelector::NoNamespace) => false,
+        Some(NamespaceSelector::NoNamespace) | Some(NamespaceSelector::Never) => false,
     };
     if !namespace_matches {
         return false;
@@ -762,7 +892,25 @@ fn compound_matches(doc: &Document, id: NodeId, compound: &CompoundSelector) -> 
         }
     }
     for attr in &compound.attributes {
-        let Some(value) = element.get_attribute(&attr.name) else {
+        let value = match attr.namespace {
+            None => element.get_attribute(&attr.name),
+            Some(AttributeNamespaceSelector::Any) => element
+                .attributes
+                .iter()
+                .find(|candidate| candidate.local_name().eq_ignore_ascii_case(&attr.name))
+                .map(|candidate| candidate.value.as_str()),
+            Some(AttributeNamespaceSelector::NoNamespace) => element
+                .attributes
+                .iter()
+                .find(|candidate| {
+                    candidate.prefix().is_none() && candidate.name.eq_ignore_ascii_case(&attr.name)
+                })
+                .map(|candidate| candidate.value.as_str()),
+            Some(selector) => selector
+                .namespace()
+                .and_then(|namespace| doc.get_attribute_ns(id, namespace, &attr.name)),
+        };
+        let Some(value) = value else {
             return false;
         };
         let eq = |left: &str, right: &str| {
@@ -850,6 +998,7 @@ fn pseudo_matches(doc: &Document, id: NodeId, pseudo: &PseudoClass) -> bool {
         PseudoClass::Checked => doc
             .element(id)
             .is_some_and(|el| el.has_attribute("checked") || el.has_attribute("selected")),
+        PseudoClass::Hover => doc.hover_target() == Some(id),
         PseudoClass::NthChild(nth) => element_index(doc, id).is_some_and(|i| nth.matches(i)),
         PseudoClass::NthLastChild(nth) => {
             element_index_from_end(doc, id).is_some_and(|i| nth.matches(i))
@@ -896,4 +1045,29 @@ fn previous_element_sibling(doc: &Document, id: NodeId) -> Option<NodeId> {
         .rev()
         .copied()
         .find(|&s| doc.is_element(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::html::parse_html;
+
+    #[test]
+    fn hover_pseudo_matches_only_the_hover_target() {
+        let mut doc = parse_html(r#"<div id="a"><p id="b">x</p></div>"#);
+        let a = doc.select("#a").unwrap().unwrap();
+        let b = doc.select("#b").unwrap().unwrap();
+
+        // Nothing is hovered initially.
+        assert!(!doc.matches(b, "p:hover").unwrap());
+        assert!(!doc.matches(a, "div:hover").unwrap());
+
+        doc.set_hover_target(Some(b));
+        assert!(doc.matches(b, "p:hover").unwrap());
+        assert!(doc.matches(b, "#a p:hover").unwrap());
+        assert!(!doc.matches(a, "div:hover").unwrap());
+        assert!(doc.matches(a, "div:not(:hover)").unwrap());
+
+        doc.set_hover_target(None);
+        assert!(!doc.matches(b, "p:hover").unwrap());
+    }
 }

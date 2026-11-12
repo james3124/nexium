@@ -89,6 +89,177 @@ async fn handle(mut stream: TcpStream) {
             "Content-Type: text/html\r\n",
             b"<html><head><link rel=stylesheet href=/import.css></head><body><p id=x>x</p></body></html>".to_vec(),
         ),
+        "/js-page" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><p id=out>waiting</p><script src=/script.js></script></body></html>".to_vec(),
+        ),
+        "/module-page" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><p id=out>waiting</p><script type=module src=/module.js></script></body></html>".to_vec(),
+        ),
+        "/module.js" => response(
+            200,
+            "OK",
+            "Content-Type: text/javascript\r\n",
+            b"document.getElementById('out').textContent='module-external';".to_vec(),
+        ),
+        "/one" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><head><title>One</title></head><body><p>one</p></body></html>".to_vec(),
+        ),
+        "/two" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><head><title>Two</title></head><body><p>two</p></body></html>".to_vec(),
+        ),
+        "/ls-write" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><script>localStorage.setItem('k','v');</script></body></html>".to_vec(),
+        ),
+        "/ls-read" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><script>document.body.setAttribute('data-v', localStorage.getItem('k') || 'missing');</script></body></html>".to_vec(),
+        ),
+        "/ss-write" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><script>sessionStorage.setItem('s','per-tab');</script></body></html>".to_vec(),
+        ),
+        "/worker-page" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body data-worker=\"\"><script>
+  var worker = new Worker('/worker.js');
+  worker.onmessage = function (event) {
+    document.body.setAttribute('data-worker', String(event.data.value));
+    clearInterval(timer);
+  };
+  worker.postMessage({ value: 21 });
+  var tries = 0;
+  var timer = setInterval(function () { if (++tries > 200) clearInterval(timer); }, 10);
+</script></body></html>".to_vec(),
+        ),
+        "/worker.js" => response(
+            200,
+            "OK",
+            "Content-Type: text/javascript\r\n",
+            b"self.onmessage = function (event) { postMessage({ value: event.data.value * 2 }); };".to_vec(),
+        ),
+        "/interact" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            br#"<html><head><title>Interact</title><style>
+  body { margin: 0; font-family: sans-serif; }
+  #btn { position: absolute; left: 20px; top: 40px; width: 120px; height: 40px; }
+  #name { position: absolute; left: 20px; top: 130px; width: 200px; height: 30px; }
+  #out { position: absolute; left: 20px; top: 190px; }
+  #link { position: absolute; left: 20px; top: 230px; }
+</style></head><body>
+  <h1 id="heading" style="position:absolute;left:20px;top:0;margin:0">Heading</h1>
+  <button id="btn">Click me</button>
+  <input id="name" aria-label="Name" value="">
+  <div id="out" data-count="0">none</div>
+  <a id="link" href="/two">Go</a>
+  <script>
+    var count = 0;
+    var out = document.getElementById('out');
+    document.getElementById('btn').addEventListener('click', function () {
+      count += 1;
+      out.setAttribute('data-count', String(count));
+      out.textContent = 'clicked ' + count;
+    });
+    document.getElementById('btn').addEventListener('mouseover', function () {
+      out.setAttribute('data-hover', 'yes');
+    });
+    document.getElementById('name').addEventListener('input', function (event) {
+      out.setAttribute('data-value', event.target.value);
+    });
+    document.getElementById('name').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') { out.setAttribute('data-enter', 'yes'); }
+    });
+  </script>
+</body></html>"#.to_vec(),
+        ),
+        "/scroll-page" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><head><title>Scroll</title><style>body{margin:0}</style></head><body><div style=\"height:1200px\"></div><div id=\"target\" style=\"height:20px\">Target</div><div style=\"height:800px\"></div></body></html>".to_vec(),
+        ),
+        "/idb-write" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><script>
+  var open = indexedDB.open('notes', 1);
+  open.onupgradeneeded = function () { open.result.createObjectStore('items'); };
+  open.onsuccess = function () {
+    var tx = open.result.transaction('items', 'readwrite');
+    var request = tx.objectStore('items').put({ text: 'hello' }, 'k1');
+    request.onsuccess = function () { document.body.setAttribute('data-put', 'ok'); };
+    tx.oncomplete = function () { document.body.setAttribute('data-done', 'yes'); };
+  };
+</script></body></html>".to_vec(),
+        ),
+        "/idb-read" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><script>
+  var open = indexedDB.open('notes');
+  open.onsuccess = function () {
+    var request = open.result.transaction('items').objectStore('items').get('k1');
+    request.onsuccess = function () {
+      document.body.setAttribute('data-v', request.result ? request.result.text : 'missing');
+    };
+  };
+</script></body></html>".to_vec(),
+        ),
+        "/echo-header" => response(
+            200,
+            "OK",
+            "Content-Type: text/plain\r\n",
+            header_value("x-test").unwrap_or_default().into_bytes(),
+        ),
+        "/fetch-request" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><p id=out>waiting</p><p id=abort>no</p><script>
+  const headers = new Headers({ 'x-test': 'abc' });
+  const request = new Request('/echo-header', { headers });
+  fetch(request).then(r => r.text()).then(t => { document.getElementById('out').textContent = t; });
+  const controller = new AbortController();
+  controller.abort();
+  fetch('/', { signal: controller.signal }).catch(() => { document.getElementById('abort').textContent = 'aborted'; });
+</script></body></html>".to_vec(),
+        ),
+        "/script.js" => response(
+            200,
+            "OK",
+            "Content-Type: text/javascript\r\n",
+            b"document.getElementById('out').textContent='external'; console.log('external log');".to_vec(),
+        ),
+        "/fetch-js" => response(
+            200,
+            "OK",
+            "Content-Type: text/html\r\n",
+            b"<html><body><p id=out>waiting</p><script>fetch('/').then(r => r.text()).then(t => { document.getElementById('out').textContent = t.includes('Hello') ? 'ok' : 'bad'; });</script></body></html>".to_vec(),
+        ),
         "/import-style" => response(
             200,
             "OK",

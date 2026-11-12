@@ -6,9 +6,10 @@ use super::parser::ComponentValue;
 use super::values::{
     AlignContent, AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BackgroundSizeMode,
     BorderStyle, BoxSizing, Color, Display, Edges, FlexDirection, FlexWrap, FontStyle,
-    JustifyContent, Length, LineHeight, ListStyleType, Overflow, PaintColor, Position, TextAlign,
-    TextDecoration, Viewport, Visibility, WhiteSpace, expand_four, ident, number, parse_color,
-    parse_font_size_keyword, parse_length, parse_lengths, parse_url, percentage, significant,
+    GridAutoFlow, GridPlacement, GridTrack, JustifyContent, Length, LineHeight, ListStyleType,
+    Overflow, PaintColor, Position, TextAlign, TextDecoration, Viewport, Visibility, WhiteSpace,
+    expand_four, ident, number, parse_color, parse_font_size_keyword, parse_length, parse_lengths,
+    parse_url, percentage, significant,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,12 +67,23 @@ pub enum PropertyId {
     AlignSelf,
     AlignContent,
     BorderSpacing,
+    BorderCollapse,
+    CaptionSide,
     ListStyleType,
     FlexGrow,
     FlexShrink,
     FlexBasis,
     RowGap,
     ColumnGap,
+    GridTemplateColumns,
+    GridTemplateRows,
+    GridAutoColumns,
+    GridAutoRows,
+    GridAutoFlow,
+    GridColumnStart,
+    GridColumnEnd,
+    GridRowStart,
+    GridRowEnd,
     Order,
     Top,
     Right,
@@ -128,12 +140,23 @@ pub enum PropertyValue {
     AlignSelf(AlignSelf),
     AlignContent(AlignContent),
     BorderSpacing(Length, Length),
+    BorderCollapse(BorderCollapse),
+    CaptionSide(CaptionSide),
     ListStyleType(ListStyleType),
     FlexGrow(f32),
     FlexShrink(f32),
     FlexBasis(Length),
     RowGap(Length),
     ColumnGap(Length),
+    GridTemplateColumns(Vec<GridTrack>),
+    GridTemplateRows(Vec<GridTrack>),
+    GridAutoColumns(GridTrack),
+    GridAutoRows(GridTrack),
+    GridAutoFlow(GridAutoFlow),
+    GridColumnStart(GridPlacement),
+    GridColumnEnd(GridPlacement),
+    GridRowStart(GridPlacement),
+    GridRowEnd(GridPlacement),
     Order(i32),
     Top(Length),
     Right(Length),
@@ -162,6 +185,22 @@ pub enum BorderEdge {
     Right,
     Bottom,
     Left,
+}
+
+/// `border-collapse` values. Inherited, initial `separate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BorderCollapse {
+    #[default]
+    Separate,
+    Collapse,
+}
+
+/// `caption-side` values. Inherited, initial `top`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaptionSide {
+    #[default]
+    Top,
+    Bottom,
 }
 
 impl BorderEdge {
@@ -242,12 +281,23 @@ pub struct ComputedStyle {
     pub align_content: AlignContent,
     pub border_spacing_x: f32,
     pub border_spacing_y: f32,
+    pub border_collapse: BorderCollapse,
+    pub caption_side: CaptionSide,
     pub list_style_type: ListStyleType,
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Length,
     pub row_gap: Length,
     pub column_gap: Length,
+    pub grid_template_columns: Vec<GridTrack>,
+    pub grid_template_rows: Vec<GridTrack>,
+    pub grid_auto_columns: GridTrack,
+    pub grid_auto_rows: GridTrack,
+    pub grid_auto_flow: GridAutoFlow,
+    pub grid_column_start: GridPlacement,
+    pub grid_column_end: GridPlacement,
+    pub grid_row_start: GridPlacement,
+    pub grid_row_end: GridPlacement,
     pub order: i32,
     pub top: Length,
     pub right: Length,
@@ -309,12 +359,23 @@ impl ComputedStyle {
             align_content: AlignContent::Stretch,
             border_spacing_x: 0.0,
             border_spacing_y: 0.0,
+            border_collapse: BorderCollapse::Separate,
+            caption_side: CaptionSide::Top,
             list_style_type: ListStyleType::Disc,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             row_gap: Length::Px(0.0),
             column_gap: Length::Px(0.0),
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_auto_columns: GridTrack::Auto,
+            grid_auto_rows: GridTrack::Auto,
+            grid_auto_flow: GridAutoFlow::Row,
+            grid_column_start: GridPlacement::Auto,
+            grid_column_end: GridPlacement::Auto,
+            grid_row_start: GridPlacement::Auto,
+            grid_row_end: GridPlacement::Auto,
             order: 0,
             top: Length::Auto,
             right: Length::Auto,
@@ -341,6 +402,8 @@ impl ComputedStyle {
         style.text_decoration = parent.text_decoration;
         style.visibility = parent.visibility;
         style.list_style_type = parent.list_style_type;
+        style.border_collapse = parent.border_collapse;
+        style.caption_side = parent.caption_side;
         style.font_family = parent.font_family.clone();
         style.custom_properties = parent.custom_properties.clone();
         style
@@ -461,11 +524,24 @@ impl ComputedStyle {
                     .max(0.0);
             }
             PropertyValue::ListStyleType(kind) => self.list_style_type = *kind,
+            PropertyValue::BorderCollapse(collapse) => self.border_collapse = *collapse,
+            PropertyValue::CaptionSide(side) => self.caption_side = *side,
             PropertyValue::FlexGrow(grow) => self.flex_grow = grow.max(0.0),
             PropertyValue::FlexShrink(shrink) => self.flex_shrink = shrink.max(0.0),
             PropertyValue::FlexBasis(basis) => self.flex_basis = *basis,
             PropertyValue::RowGap(gap) => self.row_gap = *gap,
             PropertyValue::ColumnGap(gap) => self.column_gap = *gap,
+            PropertyValue::GridTemplateColumns(tracks) => {
+                self.grid_template_columns = tracks.clone()
+            }
+            PropertyValue::GridTemplateRows(tracks) => self.grid_template_rows = tracks.clone(),
+            PropertyValue::GridAutoColumns(track) => self.grid_auto_columns = track.clone(),
+            PropertyValue::GridAutoRows(track) => self.grid_auto_rows = track.clone(),
+            PropertyValue::GridAutoFlow(flow) => self.grid_auto_flow = *flow,
+            PropertyValue::GridColumnStart(placement) => self.grid_column_start = *placement,
+            PropertyValue::GridColumnEnd(placement) => self.grid_column_end = *placement,
+            PropertyValue::GridRowStart(placement) => self.grid_row_start = *placement,
+            PropertyValue::GridRowEnd(placement) => self.grid_row_end = *placement,
             PropertyValue::Order(order) => self.order = *order,
             PropertyValue::Top(length) => self.top = *length,
             PropertyValue::Right(length) => self.right = *length,
@@ -1044,6 +1120,27 @@ pub fn expand_declaration(
                 _ => {}
             }
         }
+        "border-collapse" => {
+            if let Some(collapse) = sig.iter().find_map(|v| match ident(v)?.as_str() {
+                "collapse" => Some(BorderCollapse::Collapse),
+                "separate" => Some(BorderCollapse::Separate),
+                _ => None,
+            }) {
+                out.push((
+                    PropertyId::BorderCollapse,
+                    PropertyValue::BorderCollapse(collapse),
+                ));
+            }
+        }
+        "caption-side" => {
+            if let Some(side) = sig.iter().find_map(|v| match ident(v)?.as_str() {
+                "top" => Some(CaptionSide::Top),
+                "bottom" => Some(CaptionSide::Bottom),
+                _ => None,
+            }) {
+                out.push((PropertyId::CaptionSide, PropertyValue::CaptionSide(side)));
+            }
+        }
         "align-content" => {
             if let Some(align) = sig.iter().find_map(|v| match ident(v)?.as_str() {
                 "flex-start" | "start" => Some(AlignContent::FlexStart),
@@ -1095,6 +1192,109 @@ pub fn expand_declaration(
         "column-gap" => {
             if let Some(length) = sig.iter().copied().find_map(parse_length) {
                 out.push((PropertyId::ColumnGap, PropertyValue::ColumnGap(length)));
+            }
+        }
+        "grid-template-columns" => {
+            if let Some(tracks) = parse_grid_tracks(&sig) {
+                out.push((
+                    PropertyId::GridTemplateColumns,
+                    PropertyValue::GridTemplateColumns(tracks),
+                ));
+            }
+        }
+        "grid-template-rows" => {
+            if let Some(tracks) = parse_grid_tracks(&sig) {
+                out.push((
+                    PropertyId::GridTemplateRows,
+                    PropertyValue::GridTemplateRows(tracks),
+                ));
+            }
+        }
+        "grid-auto-columns" => {
+            if let Some(track) = sig.iter().find_map(|value| parse_grid_track(value)) {
+                out.push((
+                    PropertyId::GridAutoColumns,
+                    PropertyValue::GridAutoColumns(track),
+                ));
+            }
+        }
+        "grid-auto-rows" => {
+            if let Some(track) = sig.iter().find_map(|value| parse_grid_track(value)) {
+                out.push((PropertyId::GridAutoRows, PropertyValue::GridAutoRows(track)));
+            }
+        }
+        "grid-auto-flow" => {
+            let column = sig
+                .iter()
+                .any(|value| ident(value).as_deref() == Some("column"));
+            let dense = sig
+                .iter()
+                .any(|value| ident(value).as_deref() == Some("dense"));
+            let flow = match (column, dense) {
+                (false, false) => GridAutoFlow::Row,
+                (true, false) => GridAutoFlow::Column,
+                (false, true) => GridAutoFlow::RowDense,
+                (true, true) => GridAutoFlow::ColumnDense,
+            };
+            if sig
+                .iter()
+                .any(|value| matches!(ident(value).as_deref(), Some("row" | "column")))
+            {
+                out.push((PropertyId::GridAutoFlow, PropertyValue::GridAutoFlow(flow)));
+            }
+        }
+        "grid-column-start" | "grid-column-end" | "grid-row-start" | "grid-row-end" => {
+            if let Some(placement) = sig.iter().find_map(|value| parse_grid_placement(value)) {
+                let (id, value) = match name {
+                    "grid-column-start" => (
+                        PropertyId::GridColumnStart,
+                        PropertyValue::GridColumnStart(placement),
+                    ),
+                    "grid-column-end" => (
+                        PropertyId::GridColumnEnd,
+                        PropertyValue::GridColumnEnd(placement),
+                    ),
+                    "grid-row-start" => (
+                        PropertyId::GridRowStart,
+                        PropertyValue::GridRowStart(placement),
+                    ),
+                    _ => (PropertyId::GridRowEnd, PropertyValue::GridRowEnd(placement)),
+                };
+                out.push((id, value));
+            }
+        }
+        "grid-column" | "grid-row" => {
+            let mut parts: Vec<Vec<ComponentValue>> = vec![Vec::new()];
+            for value in &sig {
+                if matches!(value, ComponentValue::Delim('/')) {
+                    parts.push(Vec::new());
+                } else if let Some(part) = parts.last_mut() {
+                    part.push((**value).clone());
+                }
+            }
+            let start = parts
+                .first()
+                .and_then(|part| part.iter().find_map(parse_grid_placement));
+            let end = parts
+                .get(1)
+                .and_then(|part| part.iter().find_map(parse_grid_placement));
+            if name == "grid-column" {
+                if let Some(start) = start {
+                    out.push((
+                        PropertyId::GridColumnStart,
+                        PropertyValue::GridColumnStart(start),
+                    ));
+                }
+                if let Some(end) = end {
+                    out.push((PropertyId::GridColumnEnd, PropertyValue::GridColumnEnd(end)));
+                }
+            } else {
+                if let Some(start) = start {
+                    out.push((PropertyId::GridRowStart, PropertyValue::GridRowStart(start)));
+                }
+                if let Some(end) = end {
+                    out.push((PropertyId::GridRowEnd, PropertyValue::GridRowEnd(end)));
+                }
             }
         }
         "order" => {
@@ -1298,11 +1498,89 @@ fn parse_background_size(values: &[ComponentValue]) -> Option<BackgroundSize> {
     }
 }
 
+fn parse_grid_track(value: &ComponentValue) -> Option<GridTrack> {
+    match value {
+        ComponentValue::Dimension { value, unit } if unit.eq_ignore_ascii_case("fr") => {
+            Some(GridTrack::Fr((*value as f32).max(0.0)))
+        }
+        ComponentValue::Ident(name) if name.eq_ignore_ascii_case("auto") => Some(GridTrack::Auto),
+        ComponentValue::Ident(name) if name.eq_ignore_ascii_case("min-content") => {
+            Some(GridTrack::MinContent)
+        }
+        ComponentValue::Ident(name) if name.eq_ignore_ascii_case("max-content") => {
+            Some(GridTrack::MaxContent)
+        }
+        ComponentValue::Function { name, args } if name.eq_ignore_ascii_case("minmax") => {
+            args.iter().find_map(|arg| match parse_grid_track(arg) {
+                Some(GridTrack::Fr(value)) => Some(GridTrack::Fr(value)),
+                Some(GridTrack::Length(length)) => Some(GridTrack::Length(length)),
+                _ => None,
+            })
+        }
+        _ => parse_length(value).map(GridTrack::Length),
+    }
+}
+
+fn parse_grid_tracks(values: &[&ComponentValue]) -> Option<Vec<GridTrack>> {
+    let mut tracks = Vec::new();
+    for value in values {
+        match value {
+            ComponentValue::Comma => {}
+            ComponentValue::Function { name, args } if name.eq_ignore_ascii_case("repeat") => {
+                let mut count = 1usize;
+                let mut inner = Vec::new();
+                let mut count_seen = false;
+                for arg in args {
+                    if matches!(arg, ComponentValue::Comma) {
+                        continue;
+                    }
+                    if !count_seen && let Some(number) = number(arg) {
+                        count = number.clamp(1.0, 100.0) as usize;
+                        count_seen = true;
+                        continue;
+                    }
+                    if let Some(track) = parse_grid_track(arg) {
+                        inner.push(track);
+                    }
+                }
+                if inner.is_empty() {
+                    return None;
+                }
+                for _ in 0..count {
+                    tracks.extend(inner.iter().cloned());
+                }
+            }
+            _ => tracks.push(parse_grid_track(value)?),
+        }
+    }
+    if tracks.is_empty() {
+        None
+    } else {
+        Some(tracks)
+    }
+}
+
+fn parse_grid_placement(value: &ComponentValue) -> Option<GridPlacement> {
+    if ident(value).is_some_and(|name| name.eq_ignore_ascii_case("auto")) {
+        return Some(GridPlacement::Auto);
+    }
+    if let Some(number) = number(value) {
+        return Some(GridPlacement::Line(number as i32));
+    }
+    if let ComponentValue::Function { name, args } = value
+        && name.eq_ignore_ascii_case("span")
+    {
+        let count = args.iter().find_map(number)?.max(1.0) as u32;
+        return Some(GridPlacement::Span(count));
+    }
+    None
+}
+
 fn parse_display(value: &ComponentValue) -> Option<Display> {
     Some(match ident(value)?.as_str() {
         "none" => Display::None,
         "block" | "flow-root" => Display::Block,
-        "grid" | "inline-grid" => Display::Block,
+        "grid" | "inline-grid" => Display::Grid,
         "inline" | "contents" => Display::Inline,
         "inline-block" => Display::InlineBlock,
         "flex" | "inline-flex" => Display::Flex,

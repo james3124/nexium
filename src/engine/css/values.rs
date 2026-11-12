@@ -102,6 +102,9 @@ pub enum Length {
     Vmin(f32),
     Vmax(f32),
     Calc(LinearLength),
+    Min([LinearLength; 4], usize),
+    Max([LinearLength; 4], usize),
+    Clamp([LinearLength; 3]),
 }
 
 impl Length {
@@ -132,6 +135,43 @@ impl Length {
             Length::Calc(linear) => {
                 linear.resolve(font_size, root_font_size, viewport, percent_base)
             }
+            Length::Min(lengths, count) => {
+                if count == 0 {
+                    return None;
+                }
+                let mut result = f32::INFINITY;
+                for length in &lengths[..count] {
+                    result = result.min(length.resolve(
+                        font_size,
+                        root_font_size,
+                        viewport,
+                        percent_base,
+                    ));
+                }
+                result
+            }
+            Length::Max(lengths, count) => {
+                if count == 0 {
+                    return None;
+                }
+                let mut result = f32::NEG_INFINITY;
+                for length in &lengths[..count] {
+                    result = result.max(length.resolve(
+                        font_size,
+                        root_font_size,
+                        viewport,
+                        percent_base,
+                    ));
+                }
+                result
+            }
+            Length::Clamp([min, preferred, max]) => {
+                let min = min.resolve(font_size, root_font_size, viewport, percent_base);
+                let preferred =
+                    preferred.resolve(font_size, root_font_size, viewport, percent_base);
+                let max = max.resolve(font_size, root_font_size, viewport, percent_base);
+                preferred.max(min).min(max)
+            }
         })
     }
 
@@ -145,6 +185,38 @@ impl Length {
     ) -> f32 {
         self.resolve(font_size, root_font_size, viewport, percent_base)
             .unwrap_or(auto)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridTrack {
+    Auto,
+    Length(Length),
+    Fr(f32),
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridPlacement {
+    #[default]
+    Auto,
+    Line(i32),
+    Span(u32),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridAutoFlow {
+    #[default]
+    Row,
+    Column,
+    RowDense,
+    ColumnDense,
+}
+
+impl GridAutoFlow {
+    pub fn is_column(self) -> bool {
+        matches!(self, Self::Column | Self::ColumnDense)
     }
 }
 
@@ -246,6 +318,7 @@ pub enum Display {
     Inline,
     InlineBlock,
     Flex,
+    Grid,
     ListItem,
     Table,
     TableRow,
@@ -500,9 +573,98 @@ pub fn parse_length(value: &ComponentValue) -> Option<Length> {
         ComponentValue::Function { name, args } if name.eq_ignore_ascii_case("calc") => {
             parse_calc(args).map(Length::Calc)
         }
+        ComponentValue::Function { name, args }
+            if name.eq_ignore_ascii_case("min") || name.eq_ignore_ascii_case("max") =>
+        {
+            let lengths = parse_comma_lengths(args)?;
+            let count = lengths.len().min(4);
+            let mut arr = [LinearLength::ZERO; 4];
+            for (slot, length) in arr.iter_mut().zip(lengths.iter()) {
+                *slot = length_to_linear(*length)?;
+            }
+            if name.eq_ignore_ascii_case("min") {
+                Some(Length::Min(arr, count))
+            } else {
+                Some(Length::Max(arr, count))
+            }
+        }
+        ComponentValue::Function { name, args } if name.eq_ignore_ascii_case("clamp") => {
+            let lengths = parse_comma_lengths(args)?;
+            if lengths.len() != 3 {
+                return None;
+            }
+            Some(Length::Clamp([
+                length_to_linear(lengths[0])?,
+                length_to_linear(lengths[1])?,
+                length_to_linear(lengths[2])?,
+            ]))
+        }
         ComponentValue::Ident(name) if name.eq_ignore_ascii_case("auto") => Some(Length::Auto),
         _ => None,
     }
+}
+
+fn parse_comma_lengths(args: &[ComponentValue]) -> Option<Vec<Length>> {
+    let mut lengths = Vec::new();
+    let mut start = 0;
+    for index in 0..=args.len() {
+        if index == args.len() || matches!(args[index], ComponentValue::Comma) {
+            let group = significant(&args[start..index]);
+            if group.len() != 1 {
+                return None;
+            }
+            lengths.push(parse_length(group[0])?);
+            start = index + 1;
+        }
+    }
+    if lengths.is_empty() {
+        None
+    } else {
+        Some(lengths)
+    }
+}
+
+fn length_to_linear(length: Length) -> Option<LinearLength> {
+    Some(match length {
+        Length::Px(value) => LinearLength {
+            px: value,
+            ..LinearLength::ZERO
+        },
+        Length::Percent(value) => LinearLength {
+            percent: value,
+            ..LinearLength::ZERO
+        },
+        Length::Em(value) => LinearLength {
+            em: value,
+            ..LinearLength::ZERO
+        },
+        Length::Rem(value) => LinearLength {
+            rem: value,
+            ..LinearLength::ZERO
+        },
+        Length::Pt(value) => LinearLength {
+            px: value * 96.0 / 72.0,
+            ..LinearLength::ZERO
+        },
+        Length::Vw(value) => LinearLength {
+            vw: value,
+            ..LinearLength::ZERO
+        },
+        Length::Vh(value) => LinearLength {
+            vh: value,
+            ..LinearLength::ZERO
+        },
+        Length::Vmin(value) => LinearLength {
+            vmin: value,
+            ..LinearLength::ZERO
+        },
+        Length::Vmax(value) => LinearLength {
+            vmax: value,
+            ..LinearLength::ZERO
+        },
+        Length::Calc(linear) => linear,
+        Length::Auto | Length::Min(..) | Length::Max(..) | Length::Clamp(..) => return None,
+    })
 }
 
 fn linear_from_dimension(value: f32, unit: &str) -> Option<LinearLength> {

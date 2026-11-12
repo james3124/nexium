@@ -7,13 +7,13 @@ mod serialize;
 
 pub use document::{Document, QuirksMode};
 pub use node::{
-    Attribute, Doctype, Element, Namespace, Node, NodeData, NodeId, RAWTEXT_ELEMENTS,
-    VOID_ELEMENTS, is_rawtext_element, is_void_element,
+    Attribute, AttributeNamespace, Doctype, Element, Namespace, Node, NodeData, NodeId,
+    RAWTEXT_ELEMENTS, VOID_ELEMENTS, is_rawtext_element, is_void_element,
 };
 pub use selectors::{
-    AttributeOp, AttributeSelector, Combinator, ComplexSelector, CompoundSelector,
-    NamespaceSelector, Nth, PseudoClass, Specificity, matches_complex, matches_complex_pseudo,
-    parse_selector_list,
+    AttributeNamespaceSelector, AttributeOp, AttributeSelector, Combinator, ComplexSelector,
+    CompoundSelector, NamespaceSelector, Nth, PseudoClass, Specificity, matches_complex,
+    matches_complex_pseudo, parse_selector_list,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

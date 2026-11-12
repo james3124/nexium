@@ -1,12 +1,24 @@
 //! CSS stylesheet parser producing rules, declarations and component values.
 
-use crate::engine::dom::{ComplexSelector, parse_selector_list};
+use crate::engine::dom::selectors::parse_selector_list_with_namespaces;
+use crate::engine::dom::{ComplexSelector, NamespaceSelector};
 
 use super::tokenizer::{Token, Tokenizer};
+use super::values::{Length, Viewport, ident, number, parse_length, significant};
 
 #[derive(Clone, Debug, Default)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// `@namespace` declarations in source order.
+    pub namespaces: Vec<NamespaceDeclaration>,
+}
+
+/// A parsed `@namespace` declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceDeclaration {
+    /// Namespace prefix, or `None` for the default namespace.
+    pub prefix: Option<String>,
+    pub url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +78,10 @@ pub struct MediaCondition {
     pub feature: MediaFeature,
     pub kind: MediaKind,
     pub value: f32,
+    /// Unresolved length for `width`/`height` features, so `calc()`, `min()`,
+    /// `max()` and `clamp()` can be resolved against the viewport at match
+    /// time. `None` for keyword/ratio features.
+    pub length: Option<Length>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,14 +130,22 @@ impl MediaQuery {
                 }
                 MediaFeature::ColorScheme => 1.0,
             };
+            // Media-query relative units resolve against the initial font
+            // size, not the document's root font size.
+            let expected = match condition.length {
+                Some(length) => length
+                    .resolve(16.0, 16.0, Viewport { width, height }, width)
+                    .unwrap_or(f32::NAN),
+                None => condition.value,
+            };
             match condition.kind {
-                MediaKind::Min => actual >= condition.value,
-                MediaKind::Max => actual <= condition.value,
+                MediaKind::Min => actual >= expected,
+                MediaKind::Max => actual <= expected,
                 MediaKind::Exact => {
                     if matches!(condition.feature, MediaFeature::AspectRatio) {
-                        (actual - condition.value).abs() < 0.01
+                        (actual - expected).abs() < 0.01
                     } else {
-                        (actual - condition.value).abs() < 0.5
+                        (actual - expected).abs() < 0.5
                     }
                 }
             }
@@ -176,16 +200,18 @@ pub enum ComponentValue {
 
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let tokens = tokenize(input);
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser::new(tokens);
+    let rules = parser.parse_rule_list(false);
     Stylesheet {
-        rules: parser.parse_rule_list(false),
+        rules,
+        namespaces: parser.namespaces,
     }
 }
 
 /// Parse a declaration list (e.g. the contents of a `style` attribute).
 pub fn parse_declaration_list(input: &str) -> Vec<Declaration> {
     let tokens = tokenize(input);
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser::new(tokens);
     parser.parse_declarations()
 }
 
@@ -201,9 +227,23 @@ fn tokenize(input: &str) -> Vec<Token> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    namespaces: Vec<NamespaceDeclaration>,
+    /// Lowercased prefix -> namespace, for selector parsing.
+    prefixes: Vec<(String, NamespaceSelector)>,
+    default_namespace: Option<NamespaceSelector>,
 }
 
 impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            namespaces: Vec::new(),
+            prefixes: Vec::new(),
+            default_namespace: None,
+        }
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
     }
@@ -281,6 +321,33 @@ impl Parser {
 
         let prelude = self.tokens[prelude_start..end].to_vec();
         self.pos = end;
+
+        if name.eq_ignore_ascii_case("namespace") {
+            if let Some(declaration) = parse_namespace_declaration(&prelude) {
+                let selector = namespace_selector_for_url(&declaration.url);
+                if let Some(prefix) = &declaration.prefix {
+                    let key = prefix.to_ascii_lowercase();
+                    if let Some(existing) = self.prefixes.iter_mut().find(|(name, _)| *name == key)
+                    {
+                        existing.1 = selector;
+                    } else {
+                        self.prefixes.push((key, selector));
+                    }
+                } else {
+                    self.default_namespace = Some(selector);
+                }
+                self.namespaces.push(declaration);
+            }
+            match self.peek() {
+                Some(Token::Semicolon) => self.pos += 1,
+                Some(Token::LBrace) => {
+                    self.pos += 1;
+                    self.skip_block();
+                }
+                _ => {}
+            }
+            return None;
+        }
 
         if name.eq_ignore_ascii_case("import") {
             let mut url = None;
@@ -410,7 +477,11 @@ impl Parser {
         self.expect_rbrace();
 
         let selector_text = tokens_to_text(&selector_tokens);
-        let selectors = match parse_selector_list(selector_text.trim()) {
+        let selectors = match parse_selector_list_with_namespaces(
+            selector_text.trim(),
+            &self.prefixes,
+            self.default_namespace,
+        ) {
             Ok(selectors) => selectors,
             Err(_) => return None,
         };
@@ -685,106 +756,192 @@ pub fn format_number(value: f64) -> String {
 }
 
 fn parse_media_prelude(tokens: &[Token]) -> Vec<MediaQuery> {
-    let text = tokens_to_text(tokens);
-    text.split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(parse_single_media_query)
-        .collect()
-}
-
-fn parse_single_media_query(input: &str) -> MediaQuery {
-    let mut query = MediaQuery::default();
-    let mut text = input.to_ascii_lowercase();
-    text = text.trim().to_owned();
-
-    if let Some(rest) = text.strip_prefix("not ") {
-        query.negated = true;
-        text = rest.trim().to_owned();
-    }
-    if let Some(rest) = text.strip_prefix("only ") {
-        text = rest.trim().to_owned();
-    }
-
+    let mut queries = Vec::new();
+    let mut start = 0usize;
     let mut depth = 0usize;
-    let mut condition_start = None;
-    for (index, ch) in text.char_indices() {
-        match ch {
-            '(' => {
-                if depth == 0 {
-                    condition_start = Some(index);
-                }
-                depth += 1;
+    for index in 0..=tokens.len() {
+        let boundary =
+            index == tokens.len() || (depth == 0 && matches!(tokens[index], Token::Comma));
+        if boundary {
+            let part = &tokens[start..index];
+            if part.iter().any(|token| !matches!(token, Token::Whitespace)) {
+                queries.push(parse_single_media_query(part));
             }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0
-                    && let Some(start) = condition_start.take()
-                {
-                    let condition = &text[start + 1..index];
-                    match parse_media_condition(condition) {
-                        Some(condition) => query.conditions.push(condition),
-                        None => query.unsupported = true,
-                    }
-                }
-            }
+            start = index + 1;
+            continue;
+        }
+        match &tokens[index] {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
+    queries
+}
 
-    let prelude = text.split('(').next().unwrap_or("").trim();
-    let media_type = prelude
-        .split_whitespace()
-        .next()
-        .filter(|word| *word != "and")
-        .map(str::to_owned);
-    if let Some(media_type) = media_type {
+fn parse_single_media_query(tokens: &[Token]) -> MediaQuery {
+    let mut query = MediaQuery::default();
+    let mut i = 0usize;
+    skip_token_whitespace(tokens, &mut i);
+
+    if let Some(Token::Ident(name)) = tokens.get(i)
+        && name.eq_ignore_ascii_case("not")
+    {
+        query.negated = true;
+        i += 1;
+        skip_token_whitespace(tokens, &mut i);
+    }
+    if let Some(Token::Ident(name)) = tokens.get(i)
+        && name.eq_ignore_ascii_case("only")
+    {
+        i += 1;
+        skip_token_whitespace(tokens, &mut i);
+    }
+    if let Some(Token::Ident(name)) = tokens.get(i)
+        && !name.eq_ignore_ascii_case("and")
+    {
+        let media_type = name.to_ascii_lowercase();
         if !matches!(media_type.as_str(), "all" | "screen" | "print") {
             query.unsupported = true;
         }
         query.media_type = Some(media_type);
+        i += 1;
     }
 
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Whitespace | Token::Semicolon | Token::Comma => i += 1,
+            Token::LParen => {
+                let (inner, next) = take_parenthesized(tokens, i + 1);
+                match parse_media_condition_tokens(&inner) {
+                    Some(condition) => query.conditions.push(condition),
+                    None => query.unsupported = true,
+                }
+                i = next;
+            }
+            Token::Function(_) => {
+                // A bare function cannot be a media condition; skip it.
+                let (_, next) = take_parenthesized(tokens, i + 1);
+                query.unsupported = true;
+                i = next;
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("and") => i += 1,
+            _ => {
+                query.unsupported = true;
+                i += 1;
+            }
+        }
+    }
     query
 }
 
-fn parse_media_condition(input: &str) -> Option<MediaCondition> {
-    let (name, value) = input.split_once(':')?;
-    let name = name.trim().to_ascii_lowercase();
-    let value = value.trim().to_ascii_lowercase();
-    let (kind, feature) = if let Some(rest) = name.strip_prefix("min-") {
-        (MediaKind::Min, rest)
-    } else if let Some(rest) = name.strip_prefix("max-") {
-        (MediaKind::Max, rest)
+fn skip_token_whitespace(tokens: &[Token], index: &mut usize) {
+    while matches!(tokens.get(*index), Some(Token::Whitespace)) {
+        *index += 1;
+    }
+}
+
+/// Collect the tokens inside a parenthesized group whose opening parenthesis
+/// was already consumed. Returns the inner tokens and the index after the
+/// matching `)`.
+fn take_parenthesized(tokens: &[Token], start: usize) -> (Vec<Token>, usize) {
+    let mut depth = 1usize;
+    let mut inner = Vec::new();
+    let mut i = start;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Function(_) | Token::LParen => {
+                depth += 1;
+                inner.push(tokens[i].clone());
+            }
+            Token::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return (inner, i + 1);
+                }
+                inner.push(Token::RParen);
+            }
+            token => inner.push(token.clone()),
+        }
+        i += 1;
+    }
+    (inner, i)
+}
+
+fn parse_media_condition_tokens(tokens: &[Token]) -> Option<MediaCondition> {
+    let tokens = trim_tokens(tokens);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    if let Some(colon) = find_top_level(tokens, |token| matches!(token, Token::Colon)) {
+        let name = token_name_text(&tokens[..colon]).to_ascii_lowercase();
+        let value = trim_tokens(&tokens[colon + 1..]);
+        let (kind, feature) = if let Some(rest) = name.strip_prefix("min-") {
+            (MediaKind::Min, rest.to_owned())
+        } else if let Some(rest) = name.strip_prefix("max-") {
+            (MediaKind::Max, rest.to_owned())
+        } else {
+            (MediaKind::Exact, name)
+        };
+        return build_media_condition(&feature, kind, value);
+    }
+
+    // Range syntax: `(width > 600px)`, `(600px <= width)`.
+    let (operator_index, operator, value_start) = find_range_operator(tokens)?;
+    let left = trim_tokens(&tokens[..operator_index]);
+    let right = trim_tokens(&tokens[value_start..]);
+    let left_name = token_name_text(left).to_ascii_lowercase();
+    let right_name = token_name_text(right).to_ascii_lowercase();
+    let (feature, kind, value) = if is_media_feature_name(&left_name) {
+        (left_name, range_kind(operator, false), right)
+    } else if is_media_feature_name(&right_name) {
+        (right_name, range_kind(operator, true), left)
     } else {
-        (MediaKind::Exact, name.as_str())
+        return None;
     };
+    build_media_condition(&feature, kind, value)
+}
+
+fn build_media_condition(
+    feature: &str,
+    kind: MediaKind,
+    value_tokens: &[Token],
+) -> Option<MediaCondition> {
+    let components = parse_component_values(value_tokens);
+    let values = significant(&components);
     match feature {
-        "width" => Some(MediaCondition {
-            feature: MediaFeature::Width,
-            kind,
-            value: parse_media_length(&value)?,
-        }),
-        "height" => Some(MediaCondition {
-            feature: MediaFeature::Height,
-            kind,
-            value: parse_media_length(&value)?,
-        }),
-        "aspect-ratio" => {
-            let (width, height) = value.split_once('/')?;
-            let width: f32 = width.trim().parse().ok()?;
-            let height: f32 = height.trim().parse().ok()?;
-            if height == 0.0 {
+        "width" | "height" => {
+            let length = match values.as_slice() {
+                [single] => parse_length(single),
+                _ => None,
+            }?;
+            if length.is_auto() {
                 return None;
             }
             Some(MediaCondition {
+                feature: if feature == "width" {
+                    MediaFeature::Width
+                } else {
+                    MediaFeature::Height
+                },
+                kind,
+                value: 0.0,
+                length: Some(length),
+            })
+        }
+        "aspect-ratio" => {
+            let value = parse_media_ratio(&values)?;
+            Some(MediaCondition {
                 feature: MediaFeature::AspectRatio,
                 kind,
-                value: width / height,
+                value,
+                length: None,
             })
         }
         "orientation" => {
-            let value = match value.as_str() {
+            let keyword = ident(values.first()?)?.to_ascii_lowercase();
+            let value = match keyword.as_str() {
                 "portrait" => 1.0,
                 "landscape" => 2.0,
                 _ => return None,
@@ -793,10 +950,12 @@ fn parse_media_condition(input: &str) -> Option<MediaCondition> {
                 feature: MediaFeature::Orientation,
                 kind: MediaKind::Exact,
                 value,
+                length: None,
             })
         }
         "prefers-color-scheme" => {
-            let value = match value.as_str() {
+            let keyword = ident(values.first()?)?.to_ascii_lowercase();
+            let value = match keyword.as_str() {
                 "light" => 1.0,
                 "dark" => 0.0,
                 _ => return None,
@@ -805,9 +964,144 @@ fn parse_media_condition(input: &str) -> Option<MediaCondition> {
                 feature: MediaFeature::ColorScheme,
                 kind: MediaKind::Exact,
                 value,
+                length: None,
             })
         }
         _ => None,
+    }
+}
+
+fn parse_media_ratio(values: &[&ComponentValue]) -> Option<f32> {
+    match values {
+        [single] => number(single),
+        [width, ComponentValue::Delim('/'), height] => {
+            let width = number(width)?;
+            let height = number(height)?;
+            if height == 0.0 {
+                return None;
+            }
+            Some(width / height)
+        }
+        _ => None,
+    }
+}
+
+fn is_media_feature_name(name: &str) -> bool {
+    matches!(
+        name,
+        "width" | "height" | "aspect-ratio" | "orientation" | "prefers-color-scheme"
+    )
+}
+
+fn range_kind(operator: &str, inverted: bool) -> MediaKind {
+    let effective = if inverted {
+        match operator {
+            "<" => ">",
+            ">" => "<",
+            "<=" => ">=",
+            ">=" => "<=",
+            other => other,
+        }
+    } else {
+        operator
+    };
+    match effective {
+        ">" | ">=" => MediaKind::Min,
+        "<" | "<=" => MediaKind::Max,
+        _ => MediaKind::Exact,
+    }
+}
+
+fn trim_tokens(tokens: &[Token]) -> &[Token] {
+    let mut start = 0usize;
+    let mut end = tokens.len();
+    while start < end && matches!(tokens[start], Token::Whitespace) {
+        start += 1;
+    }
+    while end > start && matches!(tokens[end - 1], Token::Whitespace) {
+        end -= 1;
+    }
+    &tokens[start..end]
+}
+
+fn find_top_level(tokens: &[Token], predicate: impl Fn(&Token) -> bool) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && predicate(token) => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Locate a top-level range comparison operator, returning its index, the
+/// operator text (including a trailing `=`) and the index just past it.
+fn find_range_operator(tokens: &[Token]) -> Option<(usize, &'static str, usize)> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::Delim(op @ ('<' | '>' | '=')) if depth == 0 => {
+                let mut operator = match op {
+                    '<' => "<",
+                    '>' => ">",
+                    _ => "=",
+                };
+                let mut next = index + 1;
+                if *op != '=' && matches!(tokens.get(next), Some(Token::Delim('='))) {
+                    operator = if *op == '<' { "<=" } else { ">=" };
+                    next += 1;
+                }
+                return Some((index, operator, next));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn token_name_text(tokens: &[Token]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        if let Token::Ident(name) = token {
+            out.push_str(name);
+        }
+    }
+    out
+}
+
+fn parse_namespace_declaration(tokens: &[Token]) -> Option<NamespaceDeclaration> {
+    let mut prefix = None;
+    let mut url = None;
+    for token in tokens {
+        match token {
+            Token::Whitespace => {}
+            Token::Ident(name) if prefix.is_none() && url.is_none() => {
+                prefix = Some(name.clone());
+            }
+            Token::StringLiteral(value) | Token::Url(value) => url = Some(value.clone()),
+            _ => {}
+        }
+    }
+    let url = url?;
+    if url.trim().is_empty() {
+        return None;
+    }
+    Some(NamespaceDeclaration { prefix, url })
+}
+
+fn namespace_selector_for_url(url: &str) -> NamespaceSelector {
+    match url.trim() {
+        "http://www.w3.org/1999/xhtml" => NamespaceSelector::Html,
+        "http://www.w3.org/2000/svg" => NamespaceSelector::Svg,
+        "http://www.w3.org/1998/Math/MathML" | "http://www.w3.org/1998/math/mathml" => {
+            NamespaceSelector::MathMl
+        }
+        _ => NamespaceSelector::Never,
     }
 }
 
@@ -902,22 +1196,4 @@ fn split_top_level_word<'a>(input: &'a str, word: &str) -> Option<Vec<&'a str>> 
         parts.push(input[last..].trim());
         Some(parts)
     }
-}
-
-fn parse_media_length(input: &str) -> Option<f32> {
-    let input = input.trim();
-    let (number, unit) = if let Some(stripped) = input.strip_suffix("px") {
-        (stripped, "px")
-    } else if let Some(stripped) = input.strip_suffix("em") {
-        (stripped, "em")
-    } else if let Some(stripped) = input.strip_suffix("rem") {
-        (stripped, "rem")
-    } else {
-        (input, "px")
-    };
-    let value: f32 = number.trim().parse().ok()?;
-    Some(match unit {
-        "em" | "rem" => value * 16.0,
-        _ => value,
-    })
 }

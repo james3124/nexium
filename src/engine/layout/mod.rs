@@ -8,9 +8,9 @@ use image::RgbaImage;
 use url::Url;
 
 use crate::engine::css::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, ComputedStyle, Display, Edges, FlexWrap,
-    JustifyContent, Length, Overflow, Position, StyleResolver, TextAlign, Viewport, WhiteSpace,
-    parse_declaration_list,
+    AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderStyle, CaptionSide, ComputedStyle,
+    Display, Edges, FlexWrap, GridPlacement, GridTrack, JustifyContent, Length, Overflow, Position,
+    StyleResolver, TextAlign, Viewport, WhiteSpace, parse_declaration_list,
 };
 use crate::engine::dom::{Document, NodeData, NodeId};
 use crate::engine::text::FontSet;
@@ -428,7 +428,12 @@ impl<'a> LayoutEngine<'a> {
         let outer_containing_height = self.containing_height;
         self.containing_height = explicit_content_height;
 
-        let content_height = if style.display == Display::Table {
+        let content_height = if style.display == Display::Grid {
+            let (children, height) =
+                self.layout_grid_children(node, &style, content_width, content_x, content_y);
+            layout.children = children;
+            height
+        } else if style.display == Display::Table {
             let (children, height) =
                 self.layout_table_children(node, &style, content_width, content_x, content_y);
             layout.children = children;
@@ -609,14 +614,22 @@ impl<'a> LayoutEngine<'a> {
                         };
                         y += gap;
                         let child_x = content_x + child_margin.left;
-                        let mut child_box = self.layout_element(
-                            child,
-                            child_style.clone(),
-                            content_width,
-                            child_x,
-                            y,
-                            None,
-                        );
+                        let mut child_box = if self.doc.tag_name(child).is_some_and(is_replaced_tag)
+                        {
+                            let mut box_ = self.layout_replaced(child, &child_style, content_width);
+                            let (old_x, old_y) = (box_.rect.x, box_.rect.y);
+                            shift_box(&mut box_, child_x - old_x, y - old_y);
+                            box_
+                        } else {
+                            self.layout_element(
+                                child,
+                                child_style.clone(),
+                                content_width,
+                                child_x,
+                                y,
+                                None,
+                            )
+                        };
                         self.apply_auto_margins(&mut child_box, &child_style, content_width);
                         y += child_box.rect.height;
                         prev_bottom = child_bottom;
@@ -1653,95 +1666,228 @@ impl<'a> LayoutEngine<'a> {
         content_y: f32,
     ) -> (Vec<LayoutBox>, f32) {
         let rows = self.collect_table_rows(node, style);
-        let column_count = rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|(cell, _)| self.cell_colspan(*cell))
-                    .sum::<usize>()
-            })
-            .max()
-            .unwrap_or(0);
-        if column_count == 0 {
-            return (Vec::new(), 0.0);
-        }
+        let collapse = self.table_border_collapse(node);
 
-        let mut spacing_x = style.border_spacing_x;
-        let mut spacing_y = style.border_spacing_y;
-        if let Some(value) = self
-            .doc
-            .get_attribute(node, "cellspacing")
-            .and_then(|value| value.trim().parse::<f32>().ok())
+        // Collapsed borders consume the spacing between cells; the legacy
+        // `cellspacing` attribute only applies to the separated model.
+        let mut spacing_x = if collapse {
+            0.0
+        } else {
+            style.border_spacing_x
+        };
+        let mut spacing_y = if collapse {
+            0.0
+        } else {
+            style.border_spacing_y
+        };
+        if !collapse
+            && let Some(value) = self
+                .doc
+                .get_attribute(node, "cellspacing")
+                .and_then(|value| value.trim().parse::<f32>().ok())
         {
             spacing_x = value.max(0.0);
             spacing_y = value.max(0.0);
         }
 
-        let mut column_widths = vec![0.0f32; column_count];
-        for row in &rows {
+        let (placements, column_count) = self.place_table_cells(&rows);
+
+        let mut top_captions: Vec<(NodeId, Arc<ComputedStyle>)> = Vec::new();
+        let mut bottom_captions: Vec<(NodeId, Arc<ComputedStyle>)> = Vec::new();
+        for (caption, caption_style) in self.collect_table_captions(node, style) {
+            if self.caption_is_bottom(caption, node) {
+                bottom_captions.push((caption, caption_style));
+            } else {
+                top_captions.push((caption, caption_style));
+            }
+        }
+
+        let (mut boxes, top_caption_height) =
+            self.layout_caption_group(&top_captions, content_width, content_x, content_y);
+        let grid_start = content_y + top_caption_height;
+        let (grid_boxes, grid_height) = self.layout_table_grid(
+            &rows,
+            &placements,
+            column_count,
+            content_width,
+            content_x,
+            grid_start,
+            spacing_x,
+            spacing_y,
+            collapse,
+        );
+        let (bottom_caption_boxes, bottom_caption_height) = self.layout_caption_group(
+            &bottom_captions,
+            content_width,
+            content_x,
+            grid_start + grid_height,
+        );
+
+        boxes.extend(grid_boxes);
+        boxes.extend(bottom_caption_boxes);
+        (
+            boxes,
+            top_caption_height + grid_height + bottom_caption_height,
+        )
+    }
+
+    /// Place every cell into a row/column grid, honouring `rowspan` occupancy
+    /// so later cells shift right around cells that span into their row.
+    fn place_table_cells(
+        &mut self,
+        rows: &[Vec<(NodeId, Arc<ComputedStyle>)>],
+    ) -> (Vec<TableCellPlacement>, usize) {
+        let mut placements = Vec::new();
+        let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); rows.len()];
+        let mut column_count = 0usize;
+
+        for (row_index, row) in rows.iter().enumerate() {
             let mut column = 0usize;
             for (cell, cell_style) in row {
-                let span = self.cell_colspan(*cell).min(column_count - column);
-                let padding = self.resolve_edges(cell_style.padding, cell_style, content_width);
-                let border = cell_style.border_width;
-                let noncontent = padding.left
-                    + padding.right
-                    + border.left
-                    + border.right
-                    + cell_style
-                        .margin
-                        .left
-                        .resolve(
-                            cell_style.font_size,
-                            self.root_font_size,
-                            self.viewport,
-                            content_width,
-                        )
-                        .unwrap_or(0.0)
-                    + cell_style
-                        .margin
-                        .right
-                        .resolve(
-                            cell_style.font_size,
-                            self.root_font_size,
-                            self.viewport,
-                            content_width,
-                        )
-                        .unwrap_or(0.0);
-                let width = if cell_style.width.is_auto() {
-                    self.intrinsic_width(*cell, cell_style) + noncontent
-                } else {
-                    let width = cell_style
-                        .width
-                        .resolve(
-                            cell_style.font_size,
-                            self.root_font_size,
-                            self.viewport,
-                            content_width,
-                        )
-                        .unwrap_or(0.0);
-                    if cell_style.box_sizing == crate::engine::css::BoxSizing::ContentBox {
-                        width + noncontent
-                    } else {
-                        width
+                while occupied[row_index].get(column).copied().unwrap_or(false) {
+                    column += 1;
+                }
+                let colspan = self.cell_colspan(*cell);
+                let rowspan = self
+                    .cell_rowspan(*cell)
+                    .min(rows.len().saturating_sub(row_index))
+                    .max(1);
+                for row_slots in occupied.iter_mut().skip(row_index).take(rowspan) {
+                    if row_slots.len() < column + colspan {
+                        row_slots.resize(column + colspan, false);
+                    }
+                    for slot in &mut row_slots[column..column + colspan] {
+                        *slot = true;
                     }
                 }
-                .max(0.0);
-                if span <= 1 {
-                    column_widths[column] = column_widths[column].max(width);
-                } else {
-                    let existing: f32 = column_widths[column..column + span].iter().sum::<f32>()
-                        + spacing_x * (span - 1) as f32;
-                    if width > existing {
-                        let extra = (width - existing) / span as f32;
-                        for column_width in &mut column_widths[column..column + span] {
-                            *column_width += extra;
-                        }
-                    }
+                column_count = column_count.max(column + colspan);
+                placements.push(TableCellPlacement {
+                    cell: *cell,
+                    style: Arc::clone(cell_style),
+                    row: row_index,
+                    column,
+                    colspan,
+                    rowspan,
+                });
+                column += colspan;
+            }
+        }
+        (placements, column_count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_table_grid(
+        &mut self,
+        rows: &[Vec<(NodeId, Arc<ComputedStyle>)>],
+        placements: &[TableCellPlacement],
+        column_count: usize,
+        content_width: f32,
+        content_x: f32,
+        start_y: f32,
+        spacing_x: f32,
+        spacing_y: f32,
+        collapse: bool,
+    ) -> (Vec<LayoutBox>, f32) {
+        if column_count == 0 || rows.is_empty() {
+            return (Vec::new(), 0.0);
+        }
+
+        // Border-collapse: half of every internal border belongs to the cell
+        // on each side, so abutting cells share a single border whose width is
+        // roughly the average of the two halves. Outer cell edges keep their
+        // full border, matching the table border that surrounds them.
+        let effective: Vec<Arc<ComputedStyle>> = placements
+            .iter()
+            .map(|placement| {
+                if !collapse {
+                    return Arc::clone(&placement.style);
                 }
-                column += span;
-                if column >= column_count {
-                    break;
+                let mut cell_style = (*placement.style).clone();
+                let left_edge = placement.column == 0;
+                let right_edge = placement.column + placement.colspan >= column_count;
+                let top_edge = placement.row == 0;
+                let bottom_edge = placement.row + placement.rowspan >= rows.len();
+                if !left_edge {
+                    cell_style.border_width.left *= 0.5;
+                }
+                if !right_edge {
+                    cell_style.border_width.right *= 0.5;
+                }
+                if !top_edge {
+                    cell_style.border_width.top *= 0.5;
+                }
+                if !bottom_edge {
+                    cell_style.border_width.bottom *= 0.5;
+                }
+                Arc::new(cell_style)
+            })
+            .collect();
+
+        let mut column_widths = vec![0.0f32; column_count];
+        for (placement, cell_style) in placements.iter().zip(&effective) {
+            let span = placement
+                .colspan
+                .min(column_count.saturating_sub(placement.column))
+                .max(1);
+            let padding = self.resolve_edges(cell_style.padding, cell_style, content_width);
+            let border = cell_style.border_width;
+            let noncontent = padding.left
+                + padding.right
+                + border.left
+                + border.right
+                + cell_style
+                    .margin
+                    .left
+                    .resolve(
+                        cell_style.font_size,
+                        self.root_font_size,
+                        self.viewport,
+                        content_width,
+                    )
+                    .unwrap_or(0.0)
+                + cell_style
+                    .margin
+                    .right
+                    .resolve(
+                        cell_style.font_size,
+                        self.root_font_size,
+                        self.viewport,
+                        content_width,
+                    )
+                    .unwrap_or(0.0);
+            let width = if cell_style.width.is_auto() {
+                self.intrinsic_width(placement.cell, cell_style) + noncontent
+            } else {
+                let width = cell_style
+                    .width
+                    .resolve(
+                        cell_style.font_size,
+                        self.root_font_size,
+                        self.viewport,
+                        content_width,
+                    )
+                    .unwrap_or(0.0);
+                if cell_style.box_sizing == crate::engine::css::BoxSizing::ContentBox {
+                    width + noncontent
+                } else {
+                    width
+                }
+            }
+            .max(0.0);
+            if span <= 1 {
+                column_widths[placement.column] = column_widths[placement.column].max(width);
+            } else {
+                let existing: f32 = column_widths[placement.column..placement.column + span]
+                    .iter()
+                    .sum::<f32>()
+                    + spacing_x * (span - 1) as f32;
+                if width > existing {
+                    let extra = (width - existing) / span as f32;
+                    for column_width in
+                        &mut column_widths[placement.column..placement.column + span]
+                    {
+                        *column_width += extra;
+                    }
                 }
             }
         }
@@ -1763,52 +1909,164 @@ impl<'a> LayoutEngine<'a> {
             column_widths.fill(share);
         }
 
-        let mut boxes = Vec::new();
-        let mut y = content_y + spacing_y;
-        for row in &rows {
-            let mut row_boxes = Vec::with_capacity(row.len());
-            let mut x = content_x + spacing_x;
-            let mut column = 0usize;
-            for (cell, cell_style) in row {
-                let span = self.cell_colspan(*cell).min(column_count - column);
-                let width = column_widths[column..column + span].iter().sum::<f32>()
-                    + spacing_x * (span.saturating_sub(1)) as f32;
-                let box_ = self.layout_element(
-                    *cell,
-                    Arc::clone(cell_style),
-                    content_width,
-                    x,
-                    y,
-                    Some(width),
-                );
-                x += width + spacing_x;
-                column += span;
-                row_boxes.push(box_);
-                if column >= column_count {
-                    break;
-                }
-            }
-            let row_height = row_boxes
-                .iter()
-                .map(|box_| box_.margin_box_height())
-                .fold(0.0f32, f32::max);
-            for box_ in &mut row_boxes {
-                if box_.style.height.is_auto() {
-                    let height = (row_height - box_.margin.top - box_.margin.bottom).max(0.0);
-                    box_.content_height = (height
-                        - box_.border.top
-                        - box_.border.bottom
-                        - box_.padding.top
-                        - box_.padding.bottom)
-                        .max(0.0);
-                    box_.rect.height = height;
-                }
-            }
-            boxes.extend(row_boxes);
-            y += row_height + spacing_y;
+        let mut column_xs = vec![0.0f32; column_count];
+        let mut x = content_x + spacing_x;
+        for (column, width) in column_widths.iter().enumerate() {
+            column_xs[column] = x;
+            x += width + spacing_x;
         }
 
-        (boxes, (y - content_y).max(0.0))
+        // Lay cells out once at a provisional y; row heights are resolved
+        // afterwards and the boxes are shifted/stretched into place.
+        let mut boxes: Vec<LayoutBox> = Vec::with_capacity(placements.len());
+        for (placement, cell_style) in placements.iter().zip(&effective) {
+            let span = placement
+                .colspan
+                .min(column_count.saturating_sub(placement.column))
+                .max(1);
+            let width = column_widths[placement.column..placement.column + span]
+                .iter()
+                .sum::<f32>()
+                + spacing_x * (span - 1) as f32;
+            boxes.push(self.layout_element(
+                placement.cell,
+                Arc::clone(cell_style),
+                content_width,
+                column_xs[placement.column],
+                start_y,
+                Some(width),
+            ));
+        }
+
+        let mut row_heights = vec![0.0f32; rows.len()];
+        for (index, placement) in placements.iter().enumerate() {
+            if placement.rowspan <= 1 {
+                row_heights[placement.row] =
+                    row_heights[placement.row].max(boxes[index].margin_box_height());
+            }
+        }
+
+        // A spanning cell's height covers all rows it occupies (plus the
+        // spacing between them). Distribute any shortfall across those rows.
+        for _ in 0..4 {
+            let mut changed = false;
+            for (index, placement) in placements.iter().enumerate() {
+                if placement.rowspan <= 1 {
+                    continue;
+                }
+                let end = (placement.row + placement.rowspan).min(rows.len());
+                let span_rows = end.saturating_sub(placement.row);
+                if span_rows == 0 {
+                    continue;
+                }
+                let available: f32 = row_heights[placement.row..end].iter().sum::<f32>()
+                    + spacing_y * (span_rows - 1) as f32;
+                let required = boxes[index].margin_box_height();
+                if required > available + 0.01 {
+                    let extra = (required - available) / span_rows as f32;
+                    for height in &mut row_heights[placement.row..end] {
+                        *height += extra;
+                    }
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut row_tops = vec![0.0f32; rows.len()];
+        let mut y = start_y + spacing_y;
+        for (row, height) in row_heights.iter().enumerate() {
+            row_tops[row] = y;
+            y += height + spacing_y;
+        }
+        let total_height = (y - start_y).max(0.0);
+
+        for (index, placement) in placements.iter().enumerate() {
+            let end = (placement.row + placement.rowspan).min(rows.len());
+            let span_rows = end.saturating_sub(placement.row).max(1);
+            let span_height: f32 = row_heights[placement.row..end].iter().sum::<f32>()
+                + spacing_y * (span_rows - 1) as f32;
+            let box_ = &mut boxes[index];
+            let dy = row_tops[placement.row] - start_y;
+            if dy.abs() > f32::EPSILON {
+                shift_box(box_, 0.0, dy);
+            }
+            if box_.style.height.is_auto() {
+                let height = (span_height - box_.margin.top - box_.margin.bottom).max(0.0);
+                box_.content_height = (height
+                    - box_.border.top
+                    - box_.border.bottom
+                    - box_.padding.top
+                    - box_.padding.bottom)
+                    .max(0.0);
+                box_.rect.height = height;
+            }
+        }
+
+        (boxes, total_height)
+    }
+
+    fn collect_table_captions(
+        &mut self,
+        node: NodeId,
+        style: &Arc<ComputedStyle>,
+    ) -> Vec<(NodeId, Arc<ComputedStyle>)> {
+        let children: Vec<NodeId> = self.doc.children(node).to_vec();
+        let mut captions = Vec::new();
+        for child in children {
+            if !matches!(self.doc.node(child).data, NodeData::Element(_)) {
+                continue;
+            }
+            if self.doc.tag_name(child) != Some("caption") {
+                continue;
+            }
+            let child_style = self.style_for(child, style, self.root_font_size);
+            if child_style.display == Display::None {
+                continue;
+            }
+            captions.push((child, child_style));
+        }
+        captions
+    }
+
+    fn layout_caption_group(
+        &mut self,
+        captions: &[(NodeId, Arc<ComputedStyle>)],
+        content_width: f32,
+        content_x: f32,
+        start_y: f32,
+    ) -> (Vec<LayoutBox>, f32) {
+        let mut boxes = Vec::with_capacity(captions.len());
+        let mut y = start_y;
+        for (caption, caption_style) in captions {
+            let margin_top = self.resolve_margins(caption_style, content_width).top;
+            let box_ = self.layout_element(
+                *caption,
+                Arc::clone(caption_style),
+                content_width,
+                content_x,
+                y + margin_top,
+                Some(content_width),
+            );
+            y += box_.margin_box_height();
+            boxes.push(box_);
+        }
+        (boxes, (y - start_y).max(0.0))
+    }
+
+    fn caption_is_bottom(&self, caption: NodeId, table: NodeId) -> bool {
+        self.styles
+            .get(&caption)
+            .or_else(|| self.styles.get(&table))
+            .is_some_and(|style| style.caption_side == CaptionSide::Bottom)
+    }
+
+    fn table_border_collapse(&self, node: NodeId) -> bool {
+        self.styles
+            .get(&node)
+            .is_some_and(|style| style.border_collapse == BorderCollapse::Collapse)
     }
 
     fn collect_table_rows(
@@ -1874,6 +2132,14 @@ impl<'a> LayoutEngine<'a> {
     fn cell_colspan(&self, cell: NodeId) -> usize {
         self.doc
             .get_attribute(cell, "colspan")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 64)
+    }
+
+    fn cell_rowspan(&self, cell: NodeId) -> usize {
+        self.doc
+            .get_attribute(cell, "rowspan")
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(1)
             .clamp(1, 64)
@@ -2247,9 +2513,31 @@ impl<'a> LayoutEngine<'a> {
                 y += line_cross + row_gap + extra_line_gap;
             }
 
+            if style.flex_direction == crate::engine::css::FlexDirection::RowReverse {
+                for box_ in &mut boxes {
+                    let margin_left = box_.rect.x - box_.margin.left;
+                    let new_margin_left = content_x + content_width
+                        - (margin_left - content_x)
+                        - box_.margin_box_width();
+                    let target_x = new_margin_left + box_.margin.left;
+                    shift_box(box_, target_x - box_.rect.x, 0.0);
+                }
+            }
             let height = definite_height.unwrap_or(base_height);
             (boxes, height)
         } else {
+            let definite_height = match style.height {
+                Length::Auto => None,
+                Length::Percent(percent) => self
+                    .containing_height
+                    .map(|height| (height * percent / 100.0).max(0.0)),
+                length => length.resolve(
+                    style.font_size,
+                    self.root_font_size,
+                    self.viewport,
+                    self.containing_height.unwrap_or(0.0),
+                ),
+            };
             let mut boxes = Vec::with_capacity(items.len());
             let mut y = content_y;
             let mut max_item_width = 0.0f32;
@@ -2327,10 +2615,40 @@ impl<'a> LayoutEngine<'a> {
                 y += box_.margin_box_height() + row_gap;
                 boxes.push(box_);
             }
-            if !items.is_empty() {
-                y -= row_gap;
+            let count = boxes.len();
+            let base_height = if count > 0 {
+                (y - content_y - row_gap).max(0.0)
+            } else {
+                0.0
+            };
+            let free = definite_height
+                .map(|height| (height - base_height).max(0.0))
+                .unwrap_or(0.0);
+            let (main_offset, extra_gap) = match style.justify_content {
+                JustifyContent::FlexStart => (0.0, 0.0),
+                JustifyContent::FlexEnd => (free, 0.0),
+                JustifyContent::Center => (free / 2.0, 0.0),
+                JustifyContent::SpaceBetween if count > 1 => (0.0, free / (count - 1) as f32),
+                JustifyContent::SpaceAround => {
+                    let extra = free / count.max(1) as f32;
+                    (extra / 2.0, extra)
+                }
+                JustifyContent::SpaceEvenly => {
+                    let extra = free / (count + 1) as f32;
+                    (extra, extra)
+                }
+                JustifyContent::SpaceBetween => (0.0, 0.0),
+            };
+            let mut delta = main_offset;
+            for (index, box_) in boxes.iter_mut().enumerate() {
+                if index > 0 {
+                    delta += extra_gap;
+                }
+                if delta != 0.0 {
+                    shift_box(box_, 0.0, delta);
+                }
             }
-            let height = (y - content_y).max(0.0);
+            let height = definite_height.unwrap_or(base_height);
             let align = match style.align_items {
                 AlignItems::Center => AlignItems::Center,
                 AlignItems::FlexEnd => AlignItems::FlexEnd,
@@ -2347,9 +2665,438 @@ impl<'a> LayoutEngine<'a> {
                     shift_box(box_, offset, 0.0);
                 }
             }
+            if style.flex_direction == crate::engine::css::FlexDirection::ColumnReverse {
+                for box_ in &mut boxes {
+                    let margin_top = box_.rect.y - box_.margin.top;
+                    let new_margin_top =
+                        content_y + height - (margin_top - content_y) - box_.margin_box_height();
+                    let target_y = new_margin_top + box_.margin.top;
+                    shift_box(box_, 0.0, target_y - box_.rect.y);
+                }
+            }
             let _ = max_item_width;
             (boxes, height)
         }
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn layout_grid_children(
+        &mut self,
+        node: NodeId,
+        style: &Arc<ComputedStyle>,
+        content_width: f32,
+        content_x: f32,
+        content_y: f32,
+    ) -> (Vec<LayoutBox>, f32) {
+        struct GridItem {
+            node: NodeId,
+            style: Arc<ComputedStyle>,
+            order: usize,
+            row: Option<usize>,
+            col: Option<usize>,
+            row_span: usize,
+            col_span: usize,
+            placed_row: usize,
+            placed_col: usize,
+        }
+
+        let mut items: Vec<GridItem> = Vec::new();
+        for (order, child) in self.doc.children(node).to_vec().into_iter().enumerate() {
+            let NodeData::Element(_) = &self.doc.node(child).data else {
+                continue;
+            };
+            let child_style = self.style_for(child, style, self.root_font_size);
+            if child_style.display == Display::None {
+                continue;
+            }
+            if matches!(child_style.position, Position::Absolute | Position::Fixed) {
+                self.positioned.push(child);
+                continue;
+            }
+            let explicit_cols = style.grid_template_columns.len().max(1);
+            let explicit_rows = style.grid_template_rows.len().max(1);
+            let (col, col_span) = grid_axis(
+                child_style.grid_column_start,
+                child_style.grid_column_end,
+                explicit_cols,
+            );
+            let (row, row_span) = grid_axis(
+                child_style.grid_row_start,
+                child_style.grid_row_end,
+                explicit_rows,
+            );
+            items.push(GridItem {
+                node: child,
+                style: child_style,
+                order,
+                row,
+                col,
+                row_span,
+                col_span,
+                placed_row: 0,
+                placed_col: 0,
+            });
+        }
+        items.sort_by(|a, b| {
+            a.style
+                .order
+                .cmp(&b.style.order)
+                .then(a.order.cmp(&b.order))
+        });
+
+        let mut columns = style.grid_template_columns.len().max(1);
+        let mut rows = style.grid_template_rows.len().max(1);
+        for item in &items {
+            if let Some(col) = item.col {
+                columns = columns.max(col + item.col_span);
+            }
+            if let Some(row) = item.row {
+                rows = rows.max(row + item.row_span);
+            }
+        }
+
+        let mut occupied: Vec<Vec<bool>> = Vec::new();
+        let fits = |occupied: &Vec<Vec<bool>>, row: usize, col: usize, rs: usize, cs: usize| {
+            for r in row..row + rs {
+                let Some(line) = occupied.get(r) else {
+                    continue;
+                };
+                for c in col..col + cs {
+                    if line.get(c).copied().unwrap_or(false) {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        let mark = |occupied: &mut Vec<Vec<bool>>, row: usize, col: usize, rs: usize, cs: usize| {
+            while occupied.len() < row + rs {
+                occupied.push(Vec::new());
+            }
+            for line in occupied.iter_mut().take(row + rs).skip(row) {
+                if line.len() < col + cs {
+                    line.resize(col + cs, false);
+                }
+                for cell in line.iter_mut().take(col + cs).skip(col) {
+                    *cell = true;
+                }
+            }
+        };
+
+        // Place items with explicit row and column first.
+        for item in items.iter_mut() {
+            if let (Some(row), Some(col)) = (item.row, item.col) {
+                mark(&mut occupied, row, col, item.row_span, item.col_span);
+                item.placed_row = row;
+                item.placed_col = col;
+            }
+        }
+        // Auto-place the rest in row-major order.
+        for item in items.iter_mut() {
+            if item.row.is_some() && item.col.is_some() {
+                continue;
+            }
+            if let (None, Some(col)) = (item.row, item.col) {
+                let mut row = 0usize;
+                while !fits(&occupied, row, col, item.row_span, item.col_span) {
+                    row += 1;
+                }
+                item.placed_row = row;
+                item.placed_col = col;
+                mark(&mut occupied, row, col, item.row_span, item.col_span);
+                rows = rows.max(row + item.row_span);
+                continue;
+            }
+            if let (Some(row), None) = (item.row, item.col) {
+                let mut col = 0usize;
+                while !fits(&occupied, row, col, item.row_span, item.col_span) {
+                    col += 1;
+                }
+                item.placed_row = row;
+                item.placed_col = col;
+                mark(&mut occupied, row, col, item.row_span, item.col_span);
+                columns = columns.max(col + item.col_span);
+                continue;
+            }
+            let mut row = 0usize;
+            let (found_row, found_col) = 'search: loop {
+                let mut col = 0usize;
+                loop {
+                    if fits(&occupied, row, col, item.row_span, item.col_span) {
+                        if col < columns {
+                            break 'search (row, col);
+                        }
+                        break;
+                    }
+                    col += 1;
+                }
+                row += 1;
+            };
+            item.placed_row = found_row;
+            item.placed_col = found_col;
+            mark(
+                &mut occupied,
+                found_row,
+                found_col,
+                item.row_span,
+                item.col_span,
+            );
+            rows = rows.max(found_row + item.row_span);
+            columns = columns.max(found_col + item.col_span);
+        }
+
+        rows = rows.max(
+            items
+                .iter()
+                .map(|item| item.placed_row + item.row_span)
+                .max()
+                .unwrap_or(1),
+        );
+        columns = columns.max(
+            items
+                .iter()
+                .map(|item| item.placed_col + item.col_span)
+                .max()
+                .unwrap_or(1),
+        );
+
+        let column_gap = style
+            .column_gap
+            .resolve(
+                style.font_size,
+                self.root_font_size,
+                self.viewport,
+                content_width,
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+        let row_gap = style
+            .row_gap
+            .resolve(
+                style.font_size,
+                self.root_font_size,
+                self.viewport,
+                content_width,
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+
+        let mut column_widths = vec![0.0f32; columns];
+        let mut auto_columns = Vec::new();
+        let mut fr_total = 0.0f32;
+        for column in 0..columns {
+            let track = style
+                .grid_template_columns
+                .get(column)
+                .cloned()
+                .unwrap_or_else(|| style.grid_auto_columns.clone());
+            match track {
+                GridTrack::Length(length) => {
+                    column_widths[column] = length
+                        .resolve(
+                            style.font_size,
+                            self.root_font_size,
+                            self.viewport,
+                            content_width,
+                        )
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                }
+                GridTrack::Fr(fr) => fr_total += fr.max(0.0),
+                GridTrack::Auto | GridTrack::MinContent | GridTrack::MaxContent => {
+                    auto_columns.push(column);
+                }
+            }
+        }
+
+        for item in &items {
+            let intrinsic = if item.style.width.is_auto() {
+                self.intrinsic_width(item.node, &item.style)
+            } else {
+                item.style
+                    .width
+                    .resolve(
+                        item.style.font_size,
+                        self.root_font_size,
+                        self.viewport,
+                        content_width,
+                    )
+                    .unwrap_or(0.0)
+            };
+            let span = item.col_span.max(1);
+            let share =
+                ((intrinsic - column_gap * span.saturating_sub(1) as f32).max(0.0)) / span as f32;
+            for column in item.placed_col..item.placed_col + item.col_span {
+                if auto_columns.contains(&column) {
+                    column_widths[column] = column_widths[column].max(share);
+                }
+            }
+        }
+
+        let gaps = column_gap * columns.saturating_sub(1) as f32;
+        let used: f32 = column_widths.iter().sum::<f32>() + gaps;
+        let remaining = (content_width - used).max(0.0);
+        if fr_total > 0.0 && remaining > 0.0 {
+            for column in 0..columns {
+                let track = style
+                    .grid_template_columns
+                    .get(column)
+                    .cloned()
+                    .unwrap_or_else(|| style.grid_auto_columns.clone());
+                if let GridTrack::Fr(fr) = track {
+                    column_widths[column] += remaining * fr.max(0.0) / fr_total;
+                }
+            }
+        } else if !auto_columns.is_empty() && remaining > 0.0 {
+            let share = remaining / auto_columns.len() as f32;
+            for column in auto_columns {
+                column_widths[column] += share;
+            }
+        }
+
+        let mut row_heights = vec![0.0f32; rows];
+        let mut auto_rows = Vec::new();
+        let mut fr_rows = Vec::new();
+        let mut fr_row_total = 0.0f32;
+        for row in 0..rows {
+            let track = style
+                .grid_template_rows
+                .get(row)
+                .cloned()
+                .unwrap_or_else(|| style.grid_auto_rows.clone());
+            match track {
+                GridTrack::Length(length) => {
+                    row_heights[row] = length
+                        .resolve(
+                            style.font_size,
+                            self.root_font_size,
+                            self.viewport,
+                            self.containing_height.unwrap_or(0.0),
+                        )
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                }
+                GridTrack::Fr(fr) => {
+                    fr_rows.push(row);
+                    fr_row_total += fr.max(0.0);
+                }
+                _ => auto_rows.push(row),
+            }
+        }
+
+        let mut boxes: Vec<Option<LayoutBox>> = (0..items.len()).map(|_| None).collect();
+        for (index, item) in items.iter().enumerate() {
+            let cell_width = column_widths
+                .iter()
+                .skip(item.placed_col)
+                .take(item.col_span)
+                .sum::<f32>()
+                + column_gap * item.col_span.saturating_sub(1) as f32;
+            let margins = self.resolve_margins(&item.style, cell_width);
+            let forced = if item.style.width.is_auto() {
+                Some((cell_width - margins.left - margins.right).max(0.0))
+            } else {
+                None
+            };
+            let box_ = self.layout_element(
+                item.node,
+                Arc::clone(&item.style),
+                cell_width,
+                0.0,
+                0.0,
+                forced,
+            );
+            let height = box_.margin_box_height();
+            for row in item.placed_row..item.placed_row + item.row_span {
+                if row < rows {
+                    let share = height / item.row_span.max(1) as f32;
+                    if !fr_rows.contains(&row) {
+                        row_heights[row] = row_heights[row].max(share);
+                    }
+                }
+            }
+            boxes[index] = Some(box_);
+        }
+
+        let definite_height = self.containing_height.filter(|height| *height > 0.0);
+        let fixed_rows: f32 =
+            row_heights.iter().sum::<f32>() + row_gap * rows.saturating_sub(1) as f32;
+        if let Some(container_height) = definite_height {
+            let free = (container_height - fixed_rows).max(0.0);
+            if fr_row_total > 0.0 && free > 0.0 {
+                for row in fr_rows {
+                    row_heights[row] += free / fr_row_total;
+                }
+            } else if !auto_rows.is_empty() && free > 0.0 {
+                let share = free / auto_rows.len() as f32;
+                for row in auto_rows {
+                    row_heights[row] += share;
+                }
+            }
+        }
+
+        let mut y = content_y;
+        let mut row_offsets = Vec::with_capacity(rows);
+        for height in &row_heights {
+            row_offsets.push(y);
+            y += height + row_gap;
+        }
+        let mut x_offsets = Vec::with_capacity(columns);
+        let mut x = content_x;
+        for width in &column_widths {
+            x_offsets.push(x);
+            x += width + column_gap;
+        }
+
+        let mut children = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let Some(mut box_) = boxes[index].take() else {
+                continue;
+            };
+            let cell_x = x_offsets.get(item.placed_col).copied().unwrap_or(content_x);
+            let cell_y = row_offsets
+                .get(item.placed_row)
+                .copied()
+                .unwrap_or(content_y);
+            let cell_width = column_widths
+                .iter()
+                .skip(item.placed_col)
+                .take(item.col_span)
+                .sum::<f32>()
+                + column_gap * item.col_span.saturating_sub(1) as f32;
+            let cell_height = row_heights
+                .iter()
+                .skip(item.placed_row)
+                .take(item.row_span)
+                .sum::<f32>()
+                + row_gap * item.row_span.saturating_sub(1) as f32;
+            if style.align_items == AlignItems::Stretch && item.style.height.is_auto() {
+                let stretched = (cell_height - box_.margin.top - box_.margin.bottom).max(0.0);
+                box_.content_height = stretched;
+                box_.rect.height = stretched
+                    + box_.border.top
+                    + box_.border.bottom
+                    + box_.padding.top
+                    + box_.padding.bottom;
+            }
+            let outer_height = box_.margin_box_height();
+            let offset = match style.align_items {
+                AlignItems::Center => ((cell_height - outer_height) / 2.0).max(0.0),
+                AlignItems::FlexEnd => (cell_height - outer_height).max(0.0),
+                _ => 0.0,
+            };
+            let target_x = cell_x + box_.margin.left;
+            let target_y = cell_y + box_.margin.top + offset;
+            let (old_x, old_y) = (box_.rect.x, box_.rect.y);
+            shift_box(&mut box_, target_x - old_x, target_y - old_y);
+            let _ = cell_width;
+            children.push(box_);
+        }
+
+        let content_height = definite_height.unwrap_or_else(|| {
+            (row_heights.iter().sum::<f32>() + row_gap * rows.saturating_sub(1) as f32).max(0.0)
+        });
+        (children, content_height)
     }
 
     fn style_for_flex_anonymous(&self, style: &Arc<ComputedStyle>) -> Arc<ComputedStyle> {
@@ -2517,8 +3264,36 @@ fn resolve_block_height(
     }
 }
 
+fn grid_axis(start: GridPlacement, end: GridPlacement, explicit: usize) -> (Option<usize>, usize) {
+    let line_index = |line: i32| -> usize {
+        if line > 0 {
+            (line - 1) as usize
+        } else {
+            (explicit as i32 + line + 1).max(0) as usize
+        }
+    };
+    let start_index = match start {
+        GridPlacement::Line(line) => Some(line_index(line)),
+        _ => None,
+    };
+    let span = match end {
+        GridPlacement::Span(span) => span.max(1) as usize,
+        GridPlacement::Line(line) => start_index
+            .map(|start| line_index(line).saturating_sub(start).max(1))
+            .unwrap_or(1),
+        GridPlacement::Auto => match start {
+            GridPlacement::Span(span) => span.max(1) as usize,
+            _ => 1,
+        },
+    };
+    (start_index, span)
+}
+
 fn is_block_level(display: Display) -> bool {
-    matches!(display, Display::Block | Display::Flex | Display::ListItem)
+    matches!(
+        display,
+        Display::Block | Display::Flex | Display::Grid | Display::ListItem
+    )
 }
 
 fn is_replaced_tag(name: &str) -> bool {
@@ -2744,6 +3519,18 @@ fn apply_relative_recursive(root: &mut LayoutBox, offset: Option<(f32, f32)>, vi
     for atomic in atomics {
         apply_relative_recursive(atomic, None, viewport);
     }
+}
+
+/// A cell placed into the table grid, including how many rows/columns it
+/// occupies starting at (`row`, `column`).
+#[derive(Clone, Debug)]
+struct TableCellPlacement {
+    cell: NodeId,
+    style: Arc<ComputedStyle>,
+    row: usize,
+    column: usize,
+    colspan: usize,
+    rowspan: usize,
 }
 
 fn shift_box(box_: &mut LayoutBox, dx: f32, dy: f32) {

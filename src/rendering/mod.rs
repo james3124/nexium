@@ -83,11 +83,18 @@ impl RenderedPage {
 
     /// Crop to the configured viewport (top of the page).
     pub fn viewport_image(&self) -> RgbaImage {
+        self.viewport_image_at(0.0, 0.0)
+    }
+
+    /// Crop to the viewport at a scroll offset.
+    pub fn viewport_image_at(&self, scroll_x: f32, scroll_y: f32) -> RgbaImage {
+        let x = scroll_x.max(0.0).min(self.image.width() as f32);
+        let y = scroll_y.max(0.0).min(self.image.height() as f32);
         let rect = crate::engine::layout::Rect {
-            x: 0.0,
-            y: 0.0,
-            width: self.viewport.width.min(self.image.width() as f32),
-            height: self.viewport.height.min(self.image.height() as f32),
+            x,
+            y,
+            width: self.viewport.width.min(self.image.width() as f32 - x),
+            height: self.viewport.height.min(self.image.height() as f32 - y),
         };
         screenshots::crop(&self.image, rect).unwrap_or_else(|| self.image.clone())
     }
@@ -106,6 +113,20 @@ impl RenderedPage {
     pub fn diff(&self, other: &RgbaImage) -> f32 {
         screenshots::diff(&self.image, other)
     }
+}
+
+/// Lay out a page without loading images or rasterizing. Used for hit testing
+/// and element detection.
+pub fn layout_page(page: &Page, viewport: Viewport) -> LayoutResult {
+    let fonts = FontSet::embedded();
+    let images = HashMap::new();
+    let resolver = crate::engine::css::StyleResolver::new(
+        &page.document,
+        user_agent_stylesheet(),
+        &page.stylesheets,
+        viewport,
+    );
+    layout_document(&page.document, &resolver, &fonts, &images, Some(&page.url))
 }
 
 /// Render a loaded page: fetch referenced images, compute styles, lay out and
@@ -143,7 +164,16 @@ pub async fn render_page(
         .ceil() as u32;
 
     let started = Instant::now();
-    let image = paint_document(&layout, &fonts, &images, Some(&page.url), width, height);
+    let image = paint_document(
+        &layout,
+        &fonts,
+        &images,
+        &page.canvases,
+        &page.document,
+        Some(&page.url),
+        width,
+        height,
+    );
     debug!("paint in {:?}", started.elapsed());
 
     Ok(RenderedPage {

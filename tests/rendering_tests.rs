@@ -36,6 +36,47 @@ async fn canvas_covers_the_document() {
 }
 
 #[tokio::test]
+async fn svg_shapes_are_painted() {
+    let html = "<style>body{margin:0}</style><svg width=100 height=100 viewBox=\"0 0 100 100\"><rect x=10 y=10 width=40 height=40 fill=\"#ff0000\"/><circle cx=70 cy=70 r=20 fill=\"blue\"/></svg>";
+    let (page, rendered) = render(html, 200.0, 120.0).await;
+    let node = page.select("svg").unwrap().unwrap();
+    let rect = rendered.layout.node_rect(node).unwrap();
+    assert_eq!(
+        pixel(
+            &rendered.image,
+            (rect.x + 20.0) as u32,
+            (rect.y + 20.0) as u32
+        ),
+        Rgba([255, 0, 0, 255])
+    );
+    assert_eq!(
+        pixel(
+            &rendered.image,
+            (rect.x + 78.0) as u32,
+            (rect.y + 78.0) as u32
+        ),
+        Rgba([0, 0, 255, 255])
+    );
+}
+
+#[tokio::test]
+async fn canvas_2d_drawing_is_painted() {
+    let html = "<style>body{margin:0}</style><canvas id=c width=100 height=50></canvas><script>var ctx=document.getElementById('c').getContext('2d');ctx.fillStyle='red';ctx.fillRect(10,10,30,20);</script>";
+    let (page, rendered) = render(html, 200.0, 100.0).await;
+    let node = page.select("#c").unwrap().unwrap();
+    assert!(page.canvases.contains_key(&node));
+    let rect = rendered.layout.node_rect(node).unwrap();
+    assert_eq!(
+        pixel(
+            &rendered.image,
+            (rect.x + 15.0) as u32,
+            (rect.y + 15.0) as u32
+        ),
+        Rgba([255, 0, 0, 255])
+    );
+}
+
+#[tokio::test]
 async fn body_background_propagates_to_canvas() {
     let html = "<body style=\"margin:0;background-color:#3366ff\"><p>x</p></body>";
     let (_, rendered) = render(html, 200.0, 100.0).await;

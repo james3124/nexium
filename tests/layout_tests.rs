@@ -55,6 +55,57 @@ fn find_box(result: &LayoutResult, node: NodeId) -> Option<&LayoutBox> {
 }
 
 #[test]
+fn grid_template_tracks_and_gaps_layout_cells() {
+    let html = "<style>body{margin:0}#g{display:grid;grid-template-columns:100px 1fr;grid-template-rows:50px 50px;gap:10px;width:400px}</style><div id=g><div id=a></div><div id=b></div><div id=c></div><div id=d></div></div>";
+    let result = layout(html, 800.0, 600.0);
+    let a = document_rect(&result, html, "#a");
+    let b = document_rect(&result, html, "#b");
+    let c = document_rect(&result, html, "#c");
+    let d = document_rect(&result, html, "#d");
+    assert_eq!((a.x, a.y, a.width, a.height), (0.0, 0.0, 100.0, 50.0));
+    assert_eq!((b.x, b.y, b.width, b.height), (110.0, 0.0, 290.0, 50.0));
+    assert_eq!((c.x, c.y, c.width, c.height), (0.0, 60.0, 100.0, 50.0));
+    assert_eq!((d.x, d.y, d.width, d.height), (110.0, 60.0, 290.0, 50.0));
+    let grid = document_rect(&result, html, "#g");
+    assert_eq!(grid.height, 110.0);
+}
+
+#[test]
+fn grid_repeat_and_explicit_spans_auto_place_items() {
+    let html = "<style>body{margin:0}#g{display:grid;grid-template-columns:repeat(3,100px);grid-auto-rows:20px}#wide{grid-column:1/3}</style><div id=g><div id=wide></div><div id=one></div><div id=two></div></div>";
+    let result = layout(html, 800.0, 600.0);
+    let wide = document_rect(&result, html, "#wide");
+    let one = document_rect(&result, html, "#one");
+    let two = document_rect(&result, html, "#two");
+    assert_eq!((wide.x, wide.y, wide.width), (0.0, 0.0, 200.0));
+    assert_eq!((one.x, one.y, one.width), (200.0, 0.0, 100.0));
+    assert_eq!((two.x, two.y, two.width), (0.0, 20.0, 100.0));
+}
+
+#[test]
+fn flex_reverse_directions_and_column_justify() {
+    let html = "<style>body{margin:0}.i{width:100px;height:20px}#row{display:flex;flex-direction:row-reverse;width:300px}#col{display:flex;flex-direction:column-reverse;height:100px}#center{display:flex;flex-direction:column;justify-content:center;height:100px}</style><div id=row><div id=a class=i></div><div id=b class=i></div><div id=c class=i></div></div><div id=col><div id=d class=i></div><div id=e class=i></div><div id=f class=i></div></div><div id=center><div id=g class=i></div><div id=h class=i></div><div id=j class=i></div></div>";
+    let result = layout(html, 800.0, 600.0);
+    let a = document_rect(&result, html, "#a");
+    let b = document_rect(&result, html, "#b");
+    let c = document_rect(&result, html, "#c");
+    assert_eq!((a.x, b.x, c.x), (200.0, 100.0, 0.0));
+    let col = document_rect(&result, html, "#col");
+    let d = document_rect(&result, html, "#d");
+    let e = document_rect(&result, html, "#e");
+    let f = document_rect(&result, html, "#f");
+    assert_eq!((d.y, e.y, f.y), (col.y + 80.0, col.y + 60.0, col.y + 40.0));
+    let center = document_rect(&result, html, "#center");
+    let g = document_rect(&result, html, "#g");
+    let h = document_rect(&result, html, "#h");
+    let j = document_rect(&result, html, "#j");
+    assert_eq!(
+        (g.y, h.y, j.y),
+        (center.y + 20.0, center.y + 40.0, center.y + 60.0)
+    );
+}
+
+#[test]
 fn percentage_width_against_body() {
     let html = "<style>body{margin:0} #a{width:50%;height:10px}</style><div id=a></div>";
     let result = layout(html, 800.0, 600.0);

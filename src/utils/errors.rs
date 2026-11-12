@@ -36,6 +36,12 @@ pub enum NxError {
     #[error("image error: {0}")]
     Image(String),
 
+    #[error("storage error: {0}")]
+    Storage(String),
+
+    #[error("browser error: {0}")]
+    Browser(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

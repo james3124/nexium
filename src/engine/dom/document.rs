@@ -1,4 +1,6 @@
-use super::node::{Attribute, Doctype, Element, Namespace, Node, NodeData, NodeId};
+use super::node::{
+    Attribute, AttributeNamespace, Doctype, Element, Namespace, Node, NodeData, NodeId,
+};
 use super::{DomError, selectors, serialize};
 
 /// An arena-backed DOM document.
@@ -12,10 +14,11 @@ pub enum QuirksMode {
     Quirks,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Document {
     nodes: Vec<Node>,
     quirks_mode: QuirksMode,
+    hover_target: Option<NodeId>,
 }
 
 impl Default for Document {
@@ -33,7 +36,17 @@ impl Document {
                 data: NodeData::Document,
             }],
             quirks_mode: QuirksMode::NoQuirks,
+            hover_target: None,
         }
+    }
+
+    /// Element currently under the synthetic pointer, used for `:hover`.
+    pub fn hover_target(&self) -> Option<NodeId> {
+        self.hover_target
+    }
+
+    pub(crate) fn set_hover_target(&mut self, target: Option<NodeId>) {
+        self.hover_target = target;
     }
 
     pub fn quirks_mode(&self) -> QuirksMode {
@@ -268,6 +281,87 @@ impl Document {
 
     pub fn get_attribute<'a>(&'a self, id: NodeId, name: &str) -> Option<&'a str> {
         self.element(id)?.get_attribute(name)
+    }
+
+    /// Resolve the namespace of `attribute` on element `id`, honouring
+    /// `xmlns:prefix` declarations on the element and its ancestors.
+    pub fn attribute_namespace(&self, id: NodeId, attribute: &Attribute) -> AttributeNamespace {
+        let namespace = attribute.namespace();
+        if namespace != AttributeNamespace::None || attribute.prefix().is_none() {
+            return namespace;
+        }
+        let prefix = attribute.prefix().unwrap_or_default();
+        for node in std::iter::once(id).chain(self.ancestors(id)) {
+            let Some(element) = self.element(node) else {
+                continue;
+            };
+            if let Some(uri) = element.namespace_binding(prefix)
+                && let Some(namespace) = AttributeNamespace::from_uri(uri)
+            {
+                return namespace;
+            }
+        }
+        AttributeNamespace::None
+    }
+
+    /// Namespace of the attribute with the given qualified name, if present.
+    pub fn attribute_namespace_by_name(
+        &self,
+        id: NodeId,
+        qualified_name: &str,
+    ) -> Option<AttributeNamespace> {
+        let attribute = self.element(id)?.find_attribute(qualified_name)?;
+        Some(self.attribute_namespace(id, attribute))
+    }
+
+    /// Look up an attribute by namespace + local name, e.g.
+    /// `get_attribute_ns(a, AttributeNamespace::XLink, "href")`.
+    pub fn get_attribute_ns<'a>(
+        &'a self,
+        id: NodeId,
+        namespace: AttributeNamespace,
+        local_name: &str,
+    ) -> Option<&'a str> {
+        let element = self.element(id)?;
+        element
+            .attributes
+            .iter()
+            .find(|attribute| {
+                attribute.local_name().eq_ignore_ascii_case(local_name)
+                    && self.attribute_namespace(id, attribute) == namespace
+            })
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    pub fn has_attribute_ns(
+        &self,
+        id: NodeId,
+        namespace: AttributeNamespace,
+        local_name: &str,
+    ) -> bool {
+        self.get_attribute_ns(id, namespace, local_name).is_some()
+    }
+
+    pub fn set_attribute_ns(
+        &mut self,
+        id: NodeId,
+        namespace: AttributeNamespace,
+        local_name: &str,
+        value: &str,
+    ) -> Result<(), DomError> {
+        let el = self.element_mut(id).ok_or(DomError::NotAnElement(id))?;
+        el.set_attribute_ns(namespace, local_name, value);
+        Ok(())
+    }
+
+    pub fn remove_attribute_ns(
+        &mut self,
+        id: NodeId,
+        namespace: AttributeNamespace,
+        local_name: &str,
+    ) -> Result<Option<String>, DomError> {
+        let el = self.element_mut(id).ok_or(DomError::NotAnElement(id))?;
+        Ok(el.remove_attribute_ns(namespace, local_name))
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> Result<Option<String>, DomError> {
