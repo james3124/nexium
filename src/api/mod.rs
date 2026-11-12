@@ -59,10 +59,10 @@ pub async fn serve(config: Config) -> Result<()> {
                 .await
                 .map_err(NxError::Io)?;
             tracing::info!(
-                "NEXIUM control server listening on http://{}",
+                "NexiumX control server listening on http://{}",
                 config.api_bind
             );
-            tracing::info!("NEXIUM control server listening on https://{tls_bind}");
+            tracing::info!("NexiumX control server listening on https://{tls_bind}");
             tokio::try_join!(
                 serve_dual_on(http_listener, Arc::clone(&service), acceptor.clone()),
                 serve_tls_on(tls_listener, service, acceptor)
@@ -74,7 +74,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 .await
                 .map_err(NxError::Io)?;
             tracing::info!(
-                "NEXIUM control server listening on https://{}",
+                "NexiumX control server listening on https://{}",
                 config.api_bind
             );
             serve_tls_on(listener, service, acceptor).await
@@ -84,7 +84,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 .await
                 .map_err(NxError::Io)?;
             tracing::info!(
-                "NEXIUM control server listening on http://{}",
+                "NexiumX control server listening on http://{}",
                 config.api_bind
             );
             serve_on(listener, service).await

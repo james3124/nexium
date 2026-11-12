@@ -7,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 <!DOCTYPE html>
 <html>
 <head>
-<title>NEXIUM render demo</title>
+<title>NexiumX render demo</title>
 <style>
   body { margin: 0; font-family: sans-serif; background-color: #f4f6fb; color: #1c2430; }
   header { display: flex; justify-content: space-between; align-items: center;
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 </head>
 <body>
   <header>
-    <div class="brand">NEXIUM</div>
+    <div class="brand">NexiumX</div>
     <nav>
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     <button>Go</button>
   </form>
 
-  <footer>&copy; 2026 NEXIUM &middot; headless rendering demo</footer>
+  <footer>&copy; 2026 NexiumX &middot; headless rendering demo</footer>
 </body>
 </html>
 "#;

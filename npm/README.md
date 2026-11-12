@@ -1,6 +1,6 @@
-# nexiumx
+# NexiumX
 
-NEXIUM is an independent, Rust-powered headless browser engine. This package
+NexiumX is an independent, Rust-powered headless browser engine. This package
 ships the `nexium` CLI and MCP server launcher for Node.js users.
 
 ## Install

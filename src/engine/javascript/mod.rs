@@ -66,7 +66,7 @@ impl Default for ScriptOptions {
     fn default() -> Self {
         Self {
             enabled: true,
-            user_agent: "Nexium/0.0".to_owned(),
+            user_agent: "NexiumX/0.0".to_owned(),
             max_runtime: Duration::from_millis(2000),
             viewport_width: 1280.0,
             viewport_height: 720.0,

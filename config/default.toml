@@ -1,4 +1,4 @@
-# NEXIUM default configuration
+# NexiumX default configuration
 
 # User-Agent sent by the networking engine. Empty means the built-in default.
 user_agent = "Nexium/0.1 (independent Rust headless browser engine)"

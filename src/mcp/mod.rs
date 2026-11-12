@@ -31,7 +31,7 @@ pub async fn handle_request(
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": {
-                        "name": "nexium",
+                        "name": "NexiumX",
                         "version": env!("CARGO_PKG_VERSION"),
                     }
                 }),

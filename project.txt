@@ -1,14 +1,14 @@
-PROJECT NEXIUM
+PROJECT NexiumX
 
 Independent Rust-Powered Headless Browser Engine
 
 1. PROJECT VISION
 
-Build NEXIUM, an independent, high-performance browser engine written primarily in Rust.
+Build NexiumX, an independent, high-performance browser engine written primarily in Rust.
 
-NEXIUM is designed to operate as a headless browser while providing the capabilities and behavior of a traditional headful desktop browser.
+NexiumX is designed to operate as a headless browser while providing the capabilities and behavior of a traditional headful desktop browser.
 
-Unlike conventional headless browser solutions, NEXIUM must not depend on Chromium, Google Chrome, Firefox, WebKit, Playwright, Puppeteer, or other existing complete browser engines.
+Unlike conventional headless browser solutions, NexiumX must not depend on Chromium, Google Chrome, Firefox, WebKit, Playwright, Puppeteer, or other existing complete browser engines.
 
 We are developing our own browser infrastructure, including:
 
@@ -37,7 +37,7 @@ The primary objective is to create an independent browser infrastructure that ca
 
 Primary Programming Language
 
-Rust must be the primary programming language for NEXIUM.
+Rust must be the primary programming language for NexiumX.
 
 Use Rust for:
 
@@ -71,7 +71,7 @@ Do not use:
 - Existing complete browser engines.
 - Existing browser automation frameworks as the foundation.
 
-Do not simply wrap another browser engine and call it NEXIUM.
+Do not simply wrap another browser engine and call it NexiumX.
 
 We must own and control the core browser implementation.
 
@@ -259,7 +259,7 @@ Use appropriate Rust graphics libraries where necessary, without embedding an ex
 
 5. JAVASCRIPT EXECUTION ENGINE
 
-NEXIUM must execute JavaScript used by modern websites.
+NexiumX must execute JavaScript used by modern websites.
 
 An embeddable JavaScript runtime such as Boa may be used.
 
@@ -394,7 +394,7 @@ Implement resource prioritization and asynchronous loading.
 
 7. HEADLESS EXECUTION SYSTEM
 
-This is one of the most important parts of NEXIUM.
+This is one of the most important parts of NexiumX.
 
 The browser must operate without opening a visible browser window.
 
@@ -439,7 +439,7 @@ The visualization system should be optional and separate from the browser engine
 
 8. AI AGENT INTERACTION ENGINE
 
-NEXIUM must provide a complete interaction system for AI agents.
+NexiumX must provide a complete interaction system for AI agents.
 
 Agents should be able to operate webpages using structured commands.
 
@@ -586,7 +586,7 @@ Example:
 
 10. BROWSER STORAGE SYSTEM
 
-NEXIUM must implement its own independent storage infrastructure.
+NexiumX must implement its own independent storage infrastructure.
 
 STRICT REQUIREMENT
 
@@ -825,7 +825,7 @@ Each tool must have:
 - Meaningful error messages.
 - Appropriate execution limits.
 
-AI agents must be able to control NEXIUM through MCP without needing access to internal Rust modules.
+AI agents must be able to control NexiumX through MCP without needing access to internal Rust modules.
 
 ---
 
@@ -860,7 +860,7 @@ JavaScript execution must not automatically receive unrestricted access to the h
 
 16. PERFORMANCE OPTIMIZATION
 
-Optimize NEXIUM for AI-driven browsing.
+Optimize NexiumX for AI-driven browsing.
 
 Implement:
 
@@ -1003,7 +1003,7 @@ This is an architectural starting point. Modify the structure when necessary, bu
 
 Do not attempt to build every feature simultaneously.
 
-Develop NEXIUM incrementally.
+Develop NexiumX incrementally.
 
 PHASE 1: FOUNDATION
 
@@ -1092,7 +1092,7 @@ Build:
 - Structured responses.
 - Multiple AI agent sessions.
 
-Deliverable: Allow external AI agents to control NEXIUM.
+Deliverable: Allow external AI agents to control NexiumX.
 
 PHASE 7: MODERN WEB COMPATIBILITY
 
@@ -1211,7 +1211,7 @@ Prioritize a working foundation and progressively expand functionality.
 
 21. FINAL PROJECT GOAL
 
-NEXIUM must become an independent, Rust-powered browser engine.
+NexiumX must become an independent, Rust-powered browser engine.
 
 It must not require Chromium, Firefox, WebKit, or any other existing complete browser engine.
 
@@ -1250,6 +1250,6 @@ AI agents must be able to:
 
 The browser must provide both structured webpage information and visual information to AI agents.
 
-NEXIUM is not a browser automation wrapper. It is our own browser engine and independent browsing infrastructure.
+NexiumX is not a browser automation wrapper. It is our own browser engine and independent browsing infrastructure.
 
 Build it with reliability, performance, security, extensibility, and modern web compatibility as its primary engineering goals.

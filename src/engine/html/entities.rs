@@ -1,5 +1,5 @@
 // @generated from https://html.spec.whatwg.org/entities.json
-// Do not edit by hand. Generated for NEXIUM.
+// Do not edit by hand. Generated for NexiumX.
 
 pub const MAX_ENTITY_LEN: usize = 32;
 

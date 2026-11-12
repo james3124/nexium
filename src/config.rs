@@ -73,7 +73,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             user_agent: concat!(
-                "Nexium/",
+                "NexiumX/",
                 env!("CARGO_PKG_VERSION"),
                 " (independent Rust headless browser engine)"
             )

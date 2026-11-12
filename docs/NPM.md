@@ -1,4 +1,4 @@
-# Publishing NEXIUM to npm
+# Publishing NexiumX to npm
 
 The npm package lives in [`npm/`](../npm) and ships a small Node launcher,
 not the Rust binary itself. Prebuilt binaries are attached to GitHub Releases
@@ -37,8 +37,8 @@ The launcher looks for the binary in this order:
 2. Tag and push:
 
    ```bash
-   git tag v0.8.0
-   git push origin v0.8.0
+   git tag v0.8.1
+   git push origin v0.8.1
    ```
 
 3. `.github/workflows/release.yml` builds release binaries for

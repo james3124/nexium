@@ -1,4 +1,4 @@
-# NEXIUM Development Roadmap and Status
+# NexiumX Development Roadmap and Status
 
 Updated: 2026-11-11
 
@@ -244,7 +244,7 @@ browser window, using viewport coordinates and live DOM events.
 - [x] Live `browser_evaluate`, network request log, page extraction and
   configurable screenshot formats.
 
-Deliverable achieved: external AI agents can control NEXIUM through REST,
+Deliverable achieved: external AI agents can control NexiumX through REST,
 WebSocket or MCP without internal Rust access.
 
 ### Phase 6 remaining gaps (tracked)

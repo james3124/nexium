@@ -1,8 +1,8 @@
 [package]
-name = "nexium"
-version = "0.8.0"
+name = "nexiumx"
+version = "0.8.1"
 edition = "2024"
-description = "NEXIUM - an independent, Rust-powered headless browser engine"
+description = "NexiumX - an independent, Rust-powered headless browser engine"
 license = "MIT"
 
 [lib]

@@ -1,4 +1,4 @@
-//! NEXIUM — an independent, Rust-powered headless browser engine.
+//! NexiumX — an independent, Rust-powered headless browser engine.
 //!
 //! Phase 1: URL handling, HTTP(S) networking, HTML tokenizer/tree builder,
 //! DOM with query selectors and serialization, and page inspection.

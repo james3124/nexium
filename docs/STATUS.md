@@ -1,4 +1,4 @@
-# NEXIUM — Implementation Status
+# NexiumX — Implementation Status
 
 Updated: 2026-11-11
 
@@ -218,7 +218,7 @@ subgrid/named lines/auto-fit, flex column wrapping, SVG filters/advanced
 gradient transforms, box shadows, and HTTP/3. These are tracked in
 [ROADMAP.md](ROADMAP.md).
 
-NEXIUM is a work in progress and does **not** claim web-platform compatibility.
+NexiumX is a work in progress and does **not** claim web-platform compatibility.
 See "Known limitations" below.
 
 ## Testing
@@ -423,7 +423,7 @@ Networking:
 
 ## License
 
-NEXIUM is released under the MIT License (see [LICENSE](../LICENSE)). Bundled
+NexiumX is released under the MIT License (see [LICENSE](../LICENSE)). Bundled
 DejaVu fonts are covered by the license in
 `assets/fonts/LICENSE-DejaVu.txt`. Third-party Rust crates retain their own
 licenses.
