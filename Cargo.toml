@@ -1,5 +1,5 @@
 [package]
-name = "nexiumx"
+name = "nexium"
 version = "0.8.1"
 edition = "2024"
 description = "NexiumX - an independent, Rust-powered headless browser engine"
