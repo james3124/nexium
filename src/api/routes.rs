@@ -246,7 +246,7 @@ async fn root() -> Response {
     Json(json!({
         "ok": true,
         "data": {
-            "name": "NexiumX",
+            "name": "nexium",
             "version": crate::VERSION,
             "health": "/health",
             "rest": "/browser/*",
@@ -263,7 +263,7 @@ async fn health(State(service): State<Arc<ApiService>>) -> Response {
     Json(json!({
         "ok": true,
         "data": {
-            "name": "NexiumX",
+            "name": "nexium",
             "version": crate::VERSION,
             "api": true,
             "auth_required": service.auth_required(),

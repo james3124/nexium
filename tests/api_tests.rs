@@ -573,7 +573,7 @@ async fn mcp_lists_tools_and_executes_browser_calls() {
     .await
     .unwrap();
     assert_eq!(initialize["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(initialize["result"]["serverInfo"]["name"], "NexiumX");
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "nexium");
 
     let listed = nexium::mcp::handle_request(
         &service,

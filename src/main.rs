@@ -6,7 +6,7 @@ use nexium::intelligence::{dump_tree, visible_text};
 use nexium::{Browser, Config, NxError, RenderOptions, VERSION};
 
 const HELP: &str = "\
-NexiumX - independent Rust headless browser engine
+NEXIUM - independent Rust headless browser engine
 
 USAGE:
     nexium <url> [OPTIONS]

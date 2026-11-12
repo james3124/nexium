@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// Top-level error type shared by the NexiumX engine.
+/// Top-level error type shared by the NEXIUM engine.
 #[derive(Debug, thiserror::Error)]
 pub enum NxError {
     #[error("invalid URL: {0}")]

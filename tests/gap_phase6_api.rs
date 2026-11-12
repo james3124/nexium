@@ -521,7 +521,7 @@ async fn mcp_sse_endpoint_streams_endpoint_and_responses() {
     let response: Value = serde_json::from_str(&message).unwrap();
     assert_eq!(response["id"], 1);
     assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(response["result"]["serverInfo"]["name"], "NexiumX");
+    assert_eq!(response["result"]["serverInfo"]["name"], "nexium");
 
     // The plain POST-only JSON-RPC endpoint keeps working.
     let direct = http(

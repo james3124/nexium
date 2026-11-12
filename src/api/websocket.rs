@@ -59,7 +59,7 @@ async fn handle_socket(service: Arc<ApiService>, auth: AuthContext, mut socket: 
         "event": "connected",
         "data": {
             "agent": auth.agent,
-            "server": "NexiumX",
+            "server": "nexium",
             "version": crate::VERSION,
         }
     });
