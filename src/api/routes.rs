@@ -24,6 +24,7 @@ use super::service::{
     TabsCreateOptions, TabsTargetOptions, TypeOptions,
 };
 use super::websocket;
+use super::{bidi, cdp, webdriver};
 use crate::mcp;
 
 #[derive(Deserialize)]
@@ -103,6 +104,7 @@ pub fn router(service: Arc<ApiService>) -> Router {
         .route("/browser/tabs/switch", post(tabs_switch))
         .route("/browser/session/save", post(session_save))
         .route("/browser/session/restore", post(session_restore))
+        .route("/browser/dom", get(dom))
         .route("/browser/network", get(network))
         .route("/browser/console", get(console))
         .route("/v1/audit", get(audit))
@@ -110,6 +112,132 @@ pub fn router(service: Arc<ApiService>) -> Router {
         .route("/v1/admin/tokens/rotate", post(tokens_rotate))
         .route("/v1/admin/tokens/{id}", delete(tokens_revoke))
         .route("/ws", get(websocket::ws_handler))
+        .route("/status", get(webdriver::status))
+        .route(
+            "/session",
+            get(bidi::session_ws).post(webdriver::new_session),
+        )
+        .route("/session/{session_id}", delete(webdriver::delete_session))
+        .route(
+            "/session/{session_id}/url",
+            get(webdriver::current_url).post(webdriver::navigate),
+        )
+        .route("/session/{session_id}/title", get(webdriver::title))
+        .route("/session/{session_id}/source", get(webdriver::source))
+        .route(
+            "/session/{session_id}/screenshot",
+            get(webdriver::screenshot),
+        )
+        .route(
+            "/session/{session_id}/element",
+            post(webdriver::find_element),
+        )
+        .route(
+            "/session/{session_id}/elements",
+            post(webdriver::find_elements),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/click",
+            post(webdriver::element_click),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/text",
+            get(webdriver::element_text),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/value",
+            post(webdriver::element_send_keys),
+        )
+        .route(
+            "/session/{session_id}/execute/sync",
+            post(webdriver::execute_sync),
+        )
+        .route("/session/{session_id}/back", post(webdriver::back))
+        .route("/session/{session_id}/forward", post(webdriver::forward))
+        .route("/session/{session_id}/refresh", post(webdriver::refresh))
+        .route(
+            "/session/{session_id}/window",
+            get(webdriver::window_handle),
+        )
+        .route(
+            "/session/{session_id}/window/handles",
+            get(webdriver::window_handles),
+        )
+        .route(
+            "/session/{session_id}/timeouts",
+            get(webdriver::get_timeouts).post(webdriver::accept_timeouts),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/attribute/{name}",
+            get(webdriver::element_attribute),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/property/{name}",
+            get(webdriver::element_attribute),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/displayed",
+            get(webdriver::element_displayed),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/enabled",
+            get(webdriver::element_enabled),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/selected",
+            get(webdriver::element_selected),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/rect",
+            get(webdriver::element_rect),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/size",
+            get(webdriver::element_size),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/name",
+            get(webdriver::element_name),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/clear",
+            post(webdriver::element_clear),
+        )
+        .route(
+            "/session/{session_id}/element/{element_id}/submit",
+            post(webdriver::element_submit),
+        )
+        .route(
+            "/session/{session_id}/window/rect",
+            get(webdriver::window_rect).post(webdriver::set_window_rect),
+        )
+        .route(
+            "/session/{session_id}/window",
+            post(webdriver::switch_window),
+        )
+        .route(
+            "/session/{session_id}/window/new",
+            post(webdriver::new_window),
+        )
+        .route(
+            "/session/{session_id}/cookie",
+            get(webdriver::get_cookies)
+                .post(webdriver::add_cookie)
+                .delete(webdriver::delete_cookies),
+        )
+        .route(
+            "/session/{session_id}/cookie/{name}",
+            delete(webdriver::delete_cookies),
+        )
+        .route("/json/version", get(cdp::version))
+        .route("/json/list", get(cdp::list))
+        .route("/json", get(cdp::list))
+        .route("/json/new", get(cdp::new_target).put(cdp::new_target))
+        .route("/json/close/{id}", get(cdp::close_target))
+        .route("/json/activate/{id}", get(cdp::activate_target))
+        .route("/json/protocol", get(cdp::protocol))
+        .route("/devtools/page/{id}", get(cdp::page_ws))
+        .route("/devtools/browser", get(cdp::browser_ws))
         .route(
             "/mcp",
             get(mcp_stream).post(mcp_endpoint).delete(mcp_delete),
@@ -529,6 +657,14 @@ async fn session_restore(
             .session_restore(&auth, session.as_deref(), options)
             .await,
     )
+}
+
+async fn dom(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
+    let (auth, session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    respond(service.dom_tree(&auth, session.as_deref()).await)
 }
 
 async fn network(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {

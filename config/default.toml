@@ -1,7 +1,7 @@
 # NexiumX default configuration
 
 # User-Agent sent by the networking engine. Empty means the built-in default.
-user_agent = "Nexium/0.1 (independent Rust headless browser engine)"
+user_agent = "NexiumX/0.8.3 (independent Rust headless browser engine)"
 
 # Per-request timeout in milliseconds.
 timeout_ms = 30000
@@ -41,6 +41,7 @@ javascript_max_runtime_ms = 2000
 
 # Optional HTTP proxy for outbound requests (HTTP CONNECT tunneling).
 # proxy = "http://127.0.0.1:8080"
+# pac_file = "/etc/proxy.pac"
 
 # Hosts that connect directly even when a proxy is configured (`no_proxy`).
 # Entries may be hostnames, `.suffix` / `*.wildcard` domains, exact IPs,

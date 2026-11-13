@@ -14,6 +14,7 @@ use super::hardening::{
     AuditEntry, AuditLog, RateLimiter, TokenInfo, TokenRegistry, constant_time_eq, normalize_agent,
 };
 use crate::browser::{Browser, TabId};
+use crate::engine::dom::{Document, NodeData, NodeId};
 use crate::interaction::MouseButton;
 use crate::networking::NetworkEvent;
 use crate::rendering::RenderOptions;
@@ -750,6 +751,398 @@ impl ApiService {
         Ok(data)
     }
 
+    /// Resolve a CSS selector to element info (WebDriver/CDP adapters).
+    pub async fn find_element(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        selector: &str,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let element = browser
+            .element(selector)?
+            .ok_or_else(|| ApiError::not_found(format!("no element matches {selector:?}")))?;
+        serde_json::to_value(element).map_err(|error| ApiError::internal(error.to_string()))
+    }
+
+    pub async fn find_elements(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        selector: &str,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let elements = browser.elements(selector)?;
+        serde_json::to_value(elements).map_err(|error| ApiError::internal(error.to_string()))
+    }
+
+    pub async fn element_text(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let text = browser
+            .element_info_node(node)?
+            .and_then(|element| element.text)
+            .unwrap_or_default();
+        Ok(json!({ "text": text }))
+    }
+
+    /// Click a node by its DOM index, following any navigation it triggers.
+    pub async fn click_node(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let rect = browser
+            .element_info_node(node)?
+            .ok_or_else(|| ApiError::not_found(format!("no element with node id {node}")))?
+            .rect;
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (result, navigation) =
+            browser.click_with_navigation(x, y, crate::interaction::MouseButton::Left)?;
+        if let Some(navigation) = navigation {
+            let _ = browser.navigate_navigation(navigation).await;
+        }
+        Ok(json!({ "clicked": result.target }))
+    }
+
+    pub async fn type_node(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+        text: &str,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let rect = browser
+            .element_info_node(node)?
+            .ok_or_else(|| ApiError::not_found(format!("no element with node id {node}")))?
+            .rect;
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        browser.click_with_button(x, y, crate::interaction::MouseButton::Left)?;
+        browser.type_text(text)?;
+        Ok(json!({ "typed": text.chars().count() }))
+    }
+
+    pub async fn page_source(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let snapshot = self.snapshot(auth, id, SnapshotOptions::default()).await?;
+        Ok(snapshot
+            .get("dom")
+            .and_then(|dom| dom.get("html"))
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    /// Full DOM tree as JSON (node ids, types, names, attributes, children).
+    pub async fn dom_tree(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let browser = entry.browser.lock().await;
+        let page = browser
+            .active_page()
+            .ok_or_else(|| ApiError::not_found("no active page"))?;
+        Ok(dom_node_json(&page.document, page.document.document_node()))
+    }
+
+    pub async fn dom_query(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        root: usize,
+        selector: &str,
+        all: bool,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let nodes = browser.node_query_in(root, selector, all)?;
+        Ok(json!(nodes))
+    }
+
+    pub async fn dom_outer(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let html = browser.node_outer_html(node)?;
+        Ok(json!({ "html": html }))
+    }
+
+    pub async fn dom_attributes(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let attributes: Vec<Value> = browser
+            .node_attributes(node)?
+            .into_iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect();
+        Ok(json!(attributes))
+    }
+
+    pub async fn dom_box(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let rect = browser
+            .element_info_node(node)?
+            .ok_or_else(|| ApiError::not_found(format!("no layout box for node {node}")))?
+            .rect;
+        Ok(json!(rect))
+    }
+
+    pub async fn element_attribute(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+        name: &str,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let value = browser
+            .node_attributes(node)?
+            .into_iter()
+            .find(|(attribute, _)| attribute.eq_ignore_ascii_case(name))
+            .map(|(_, value)| Value::String(value))
+            .unwrap_or(Value::Null);
+        Ok(value)
+    }
+
+    pub async fn element_state(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let info = browser
+            .element_info_node(node)?
+            .ok_or_else(|| ApiError::not_found(format!("no element with node id {node}")))?;
+        let selected = browser
+            .node_attributes(node)?
+            .iter()
+            .any(|(name, _)| name == "checked" || name == "selected");
+        Ok(json!({
+            "displayed": info.visible,
+            "enabled": info.enabled,
+            "selected": selected,
+            "rect": info.rect,
+            "tag": info.tag,
+            "text": info.text,
+        }))
+    }
+
+    async fn node_selector(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<String> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        browser
+            .node_selector(node)?
+            .ok_or_else(|| ApiError::not_found(format!("no selector path for node {node}")))
+    }
+
+    pub async fn clear_element(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let selector = self.node_selector(auth, id, node).await?;
+        let selector = serde_json::to_string(&selector).unwrap_or_default();
+        let script = format!(
+            "(()=>{{const el=document.querySelector({selector});\
+             if(!el)return false;el.value='';\
+             el.dispatchEvent(new Event('input',{{bubbles:true}}));\
+             el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}})()"
+        );
+        self.evaluate(auth, id, EvaluateOptions { script }).await
+    }
+
+    pub async fn submit_element(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let selector = self.node_selector(auth, id, node).await?;
+        let selector = serde_json::to_string(&selector).unwrap_or_default();
+        let script = format!(
+            "(()=>{{const el=document.querySelector({selector});if(!el)return false;\
+             const form=el.tagName==='FORM'?el:el.form;\
+             if(!form)return false;\
+             if(form.requestSubmit){{form.requestSubmit();}}else{{form.submit();}}return true;}})()"
+        );
+        self.evaluate(auth, id, EvaluateOptions { script }).await
+    }
+
+    /// Clear the HTTP fresh-GET cache (CDP `Network.clearBrowserCache`).
+    pub async fn clear_cache(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let browser = entry.browser.lock().await;
+        browser.client().clear_cache();
+        Ok(Value::Null)
+    }
+
+    pub async fn element_at_point(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        x: f32,
+        y: f32,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        let element = browser.element_at(x, y)?;
+        Ok(element.map_or(Value::Null, |element| {
+            serde_json::to_value(element).unwrap_or(Value::Null)
+        }))
+    }
+
+    pub async fn scroll_node(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let selector = self.node_selector(auth, id, node).await?;
+        let selector = serde_json::to_string(&selector).unwrap_or_default();
+        let script = format!(
+            "(()=>{{const el=document.querySelector({selector});\
+             if(!el)return false;el.scrollIntoView({{block:'center',inline:'center'}});return true;}})()"
+        );
+        self.evaluate(auth, id, EvaluateOptions { script }).await
+    }
+
+    pub async fn element_selector(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        Ok(json!(self.node_selector(auth, id, node).await?))
+    }
+
+    pub async fn focus_node(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        node: usize,
+    ) -> ApiResult<Value> {
+        let selector = self.node_selector(auth, id, node).await?;
+        let selector = serde_json::to_string(&selector).unwrap_or_default();
+        let script = format!(
+            "(()=>{{const el=document.querySelector({selector});if(!el)return false;el.focus();return true;}})()"
+        );
+        self.evaluate(auth, id, EvaluateOptions { script }).await
+    }
+
+    pub async fn window_rect(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let browser = entry.browser.lock().await;
+        let viewport = browser.viewport();
+        Ok(json!({ "x": 0, "y": 0, "width": viewport.width, "height": viewport.height }))
+    }
+
+    pub async fn set_window_rect(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        width: f32,
+        height: f32,
+    ) -> ApiResult<Value> {
+        let entry = self.resolve(auth, id).await?;
+        let mut browser = entry.browser.lock().await;
+        browser.set_viewport(width.max(1.0) as u32, height.max(1.0) as u32)?;
+        Ok(Value::Null)
+    }
+
+    pub async fn cookies(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let value = self
+            .evaluate(
+                auth,
+                id,
+                EvaluateOptions {
+                    script: "document.cookie".to_owned(),
+                },
+            )
+            .await?;
+        let raw = value
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let cookies: Vec<Value> = raw
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('='))
+            .map(|(name, value)| {
+                json!({
+                    "name": name.trim(),
+                    "value": value.trim(),
+                    "path": "/",
+                    "domain": "",
+                    "secure": false,
+                    "httpOnly": false,
+                    "expiry": Value::Null,
+                })
+            })
+            .collect();
+        Ok(json!(cookies))
+    }
+
+    pub async fn add_cookie(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        name: &str,
+        value: &str,
+    ) -> ApiResult<Value> {
+        let script = format!(
+            "document.cookie={};",
+            serde_json::to_string(&format!("{name}={value}; path=/")).unwrap_or_default()
+        );
+        self.evaluate(auth, id, EvaluateOptions { script }).await?;
+        Ok(Value::Null)
+    }
+
+    pub async fn delete_cookies(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
+        let script = "document.cookie.split(';').forEach(c=>{\
+            const name=c.split('=')[0].trim();\
+            document.cookie=name+'=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';});";
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script: script.to_owned(),
+            },
+        )
+        .await?;
+        Ok(Value::Null)
+    }
+
     pub async fn type_text(
         &self,
         auth: &AuthContext,
@@ -1183,6 +1576,73 @@ impl ApiService {
             *stored = errors.len();
         }
     }
+}
+
+fn dom_node_json(doc: &Document, id: NodeId) -> Value {
+    let node = doc.node(id);
+    let (node_type, node_name, node_value, attributes) = match &node.data {
+        NodeData::Document => (9, "#document".to_owned(), Value::Null, Vec::new()),
+        NodeData::DocumentFragment => {
+            (11, "#document-fragment".to_owned(), Value::Null, Vec::new())
+        }
+        NodeData::Doctype(doctype) => (10, doctype.name.clone(), Value::Null, Vec::new()),
+        NodeData::Text(text) => (
+            3,
+            "#text".to_owned(),
+            Value::String(text.clone()),
+            Vec::new(),
+        ),
+        NodeData::Comment(text) => (
+            8,
+            "#comment".to_owned(),
+            Value::String(text.clone()),
+            Vec::new(),
+        ),
+        NodeData::Element(element) => {
+            let attributes = element
+                .attributes
+                .iter()
+                .flat_map(|attribute| {
+                    [
+                        Value::String(attribute.name.clone()),
+                        Value::String(attribute.value.clone()),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            (1, element.name.to_uppercase(), Value::Null, attributes)
+        }
+    };
+    let mut object = serde_json::Map::new();
+    object.insert("nodeId".to_owned(), json!(id.index()));
+    object.insert("nodeType".to_owned(), json!(node_type));
+    object.insert("nodeName".to_owned(), Value::String(node_name.clone()));
+    if !node_value.is_null() {
+        object.insert("nodeValue".to_owned(), node_value);
+    }
+    if node_type == 1 {
+        object.insert(
+            "localName".to_owned(),
+            json!(match &node.data {
+                NodeData::Element(element) => element.name.clone(),
+                _ => String::new(),
+            }),
+        );
+        object.insert("attributes".to_owned(), Value::Array(attributes));
+    }
+    let children: Vec<Value> = doc
+        .children(id)
+        .iter()
+        .map(|&child| dom_node_json(doc, child))
+        .collect();
+    if !children.is_empty() {
+        object.insert("children".to_owned(), Value::Array(children));
+    }
+    if let NodeData::Element(element) = &node.data
+        && let Some(content) = element.template_contents
+    {
+        object.insert("templateContent".to_owned(), dom_node_json(doc, content));
+    }
+    Value::Object(object)
 }
 
 pub fn session_status(entry: &SessionEntry, browser: &Browser) -> Value {

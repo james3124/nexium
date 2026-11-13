@@ -1,8 +1,11 @@
 //! REST, WebSocket and MCP control plane.
 
+mod bidi;
+mod cdp;
 mod hardening;
 pub mod routes;
 pub mod service;
+mod webdriver;
 mod websocket;
 
 pub use service::{ApiError, ApiService, AuthContext, ServerEvent};

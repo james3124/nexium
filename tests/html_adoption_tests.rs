@@ -259,3 +259,21 @@ fn debug_dump_actual() {
         println!("{source} => {}", body_html(source));
     }
 }
+
+#[test]
+fn formatting_element_out_of_scope_across_table_boundary_is_ignored() {
+    let doc = parse_html("<div><b>1<table><tr><td>2</b>3</td></tr></table></div>");
+    let cell = doc.select("td").unwrap().expect("table cell");
+    // The td marker hides the formatting element from the adoption list, so
+    // </b> follows "any other end tag" and pops through the table.
+    assert_eq!(doc.text_content(cell), "2");
+    assert!(
+        doc.select("td b").unwrap().is_none(),
+        "no formatting element may leak into the cell"
+    );
+    let div = doc.select("div").unwrap().expect("wrapper div");
+    assert!(
+        doc.text_content(div).ends_with('3'),
+        "text after the ignored end tag stays outside the table"
+    );
+}

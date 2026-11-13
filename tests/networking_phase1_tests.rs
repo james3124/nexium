@@ -98,6 +98,8 @@ async fn fetch_text(client: &HttpClient, url: &str, accept: Option<&str>) -> Str
     let mut request = Request::get(parse_url(url).unwrap());
     if let Some(accept) = accept {
         request = request.header("Accept", accept).unwrap();
+        // The test models document loads explicitly as navigations.
+        request.navigation = accept.contains("text/html");
     }
     let response = client.fetch(request).await.unwrap();
     String::from_utf8_lossy(&response.body).into_owned()

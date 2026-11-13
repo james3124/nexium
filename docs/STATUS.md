@@ -22,8 +22,8 @@ limitations and licensing details. Product overview and usage live in
   content fragments, and SVG/MathML foreign content (namespaces, case
   restoration, self-closing tags, HTML integration points and breakout).
 - Formatting-element reconstruction and the WHATWG adoption agency for
-  misnested inline markup, including the outer/inner loops, bookmarks and
-  clone/re-parent steps.
+  misnested inline markup, including the outer/inner loops, bookmarks,
+  clone/re-parent steps and scope-boundary-aware "in scope" checks.
 - Arena-backed DOM with mutation APIs, text content, HTML serialization,
   `QuirksMode`, namespaces, template content, and a CSS selector engine: type,
   `#id`, `.class`, attribute operators with `i`/`s` flags, `html|`/`svg|`/
@@ -169,6 +169,14 @@ limitations and licensing details. Product overview and usage live in
   (`/v1/admin/tokens*`); unauthenticated servers refuse to bind beyond loopback.
 - Per-agent rate limiting for REST and WebSocket commands with structured
   `429` errors, and a bounded audit log (`GET /v1/audit`).
+- Native automation protocols: a W3C WebDriver subset (`/status`, `/session`
+  create/delete, url/title/source/screenshot, CSS element find/click/text/
+  attributes/rect/state, clear/submit, execute, history, window/cookies),
+  WebDriver BiDi over `WS /session` (session, browsingContext, script,
+  navigation/network/log events), and a CDP subset (`/json/version|list|new|
+  close|activate|protocol`, `/devtools/page/{id}` and `/devtools/browser`
+  WebSockets; Browser, Target, Page, Runtime, DOM, Input, Network, Storage,
+  Emulation, Log, Console, Performance, Security domains).
 - Loopback-origin CORS (including private-network preflight) and RFC 9728
   OAuth protected-resource metadata for browser-based MCP clients.
 - `nexium --api` starts the HTTP control plane (default `127.0.0.1:9222`).
@@ -231,7 +239,7 @@ See "Known limitations" below.
 
 ## Testing
 
-`cargo test` runs 311 tests covering tokenization, malformed HTML recovery, DOM
+`cargo test` runs 319 tests covering tokenization, malformed HTML recovery, DOM
 mutation/selectors/serialization, entities/quirks/templates/foreign content,
 formatting reconstruction, CSS parsing/cascade/variables/media queries,
 `@import`/`@supports`/`calc()`, generated pseudo content, block/inline/flex/
@@ -254,9 +262,9 @@ warnings` and `cargo fmt --check` are clean.
 
 HTML/DOM:
 
-- The adoption agency implements the WHATWG outer/inner loops, bookmarks and
-  clone/re-parent steps, but its "in scope" check is approximated by stack
-  membership, so exotic misnesting can still differ from a browser.
+- The adoption agency implements the WHATWG outer/inner loops, bookmarks,
+  clone/re-parent steps and the "has an element in scope" check with
+  HTML/MathML/SVG scope boundaries.
 - Interaction state (focus, hover, selection, pending navigation) is held by
   the page session; API calls that recreate the session may not carry Tab
   traversal or pending form/link navigation across separate requests.
@@ -265,7 +273,9 @@ HTML/DOM:
   (`xlink:`, `xml:`, `xmlns:` and custom `xmlns` bindings) are modelled with
   namespace-aware lookup and round-trip serialization. SVG painting covers
   basic shapes, paths, text, gradients and simple patterns, not filters or
-  full gradient/transform syntax; MathML is not painted.
+  full gradient/transform syntax. MathML has text fallback plus dedicated
+  `mfrac` layout (numerator/rule/denominator); scripts and radicals are
+  approximated inline.
 - Template content is correctly detached, but template support in the CSS
   cascade/layout pipeline is minimal (templates are `display: none`).
 
@@ -389,6 +399,10 @@ Control plane:
   remains and proxy-side resolution cannot be pinned.
 - JS `evaluate` is limited by script length and Boa loop-iteration limits, not
   a hard wall-clock kill switch.
+- WebDriver support is a subset: CSS selectors only (no XPath/link-text), no
+  W3C actions/pointer input, window rect or cookie APIs. CDP support is a
+  subset: no DOM tree, Network events, Input dispatch or full Puppeteer-level
+  domain coverage.
 - Screenshots are returned as base64 inside JSON. MCP supports JSON-RPC POST,
   Streamable HTTP (`GET /mcp` SSE stream, `DELETE /mcp`) and the legacy
   `/mcp/sse` transport; stdio remains the recommended local transport.
@@ -416,17 +430,20 @@ Interaction:
 Networking:
 
 - Cookies and the HTTP cache are persisted for profiles; non-profile clients
-  keep them in memory. SameSite rules are enforced (with same-site derived
-  from registrable domains and top-level navigation inferred from GET + HTML
-  `Accept`); cookies whose domain is a public suffix are rejected. Stale
+  keep them in memory. SameSite rules are enforced (same-site derived from
+  registrable domains; top-level navigations carry an explicit request flag);
+  cookies whose domain is a public suffix are rejected. Stale
   fresh-GET entries revalidate with `ETag`/`Last-Modified` and reuse the cached
   body on 304.
 - The cache stores only explicitly fresh (`max-age`/`Expires`) GET responses,
   ignores `Vary`, and never caches responses or requests carrying cookies,
   authorization or `Set-Cookie`.
 - Proxies support HTTP CONNECT and SOCKS5/SOCKS5H tunnels (optional username/
-  password) and `no_proxy` bypass lists; PAC files and HTTP proxy `ForwardProxy`
-  mode are not implemented.
+  password), `no_proxy` bypass lists and PAC files whose `FindProxyForURL`
+  runs through Boa with the standard PAC functions (`shExpMatch`,
+  `dnsDomainIs`, `isPlainHostName`, `isInNet`, `dnsResolve`,
+  `dnsDomainLevels`, `myIpAddress`); a pattern matcher is the fallback if the
+  script cannot run. HTTP proxy `ForwardProxy` mode is not implemented.
 - gzip, deflate and brotli are decoded; zstd and HTTP/3 are not implemented
   (HTTP/3 remains a later milestone).
 - No authentication challenge handling; redirects drop `Authorization` on

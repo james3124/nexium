@@ -496,3 +496,76 @@ async fn ssrf_is_rechecked_on_redirect_hops() {
         "the blocked redirect hop must not reach the proxy"
     );
 }
+
+fn pac_path(tag: &str, script: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "nexium-pac-{tag}-{}-{nanos}.pac",
+        std::process::id()
+    ));
+    std::fs::write(&path, script).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn pac_direct_decision_bypasses_the_static_proxy() {
+    let page = spawn_test_server().await;
+    let (proxy, connections) = spawn_dead_proxy().await;
+    let pac = pac_path(
+        "direct",
+        &format!(
+            "function FindProxyForURL(url, host) {{\n\
+             if (host == \"127.0.0.1\") return \"DIRECT\";\n\
+             return \"PROXY 127.0.0.1:{}\";\n\
+             }}",
+            proxy.port()
+        ),
+    );
+    let config = Config {
+        proxy: Some(format!("http://{proxy}")),
+        pac_file: Some(pac.clone()),
+        ..Config::default()
+    };
+    let client = HttpClient::new(&config);
+    let request = Request::get(parse_url(&format!("http://{page}/")).unwrap());
+    let response = client.fetch(request).await.unwrap();
+    assert_eq!(response.status.as_u16(), 200);
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        0,
+        "PAC DIRECT must not dial the proxy"
+    );
+    let _ = std::fs::remove_file(pac);
+}
+
+#[tokio::test]
+async fn pac_proxy_decision_routes_through_the_proxy() {
+    let page = spawn_test_server().await;
+    let (proxy, connections) = spawn_dead_proxy().await;
+    let pac = pac_path(
+        "proxy",
+        &format!(
+            "function FindProxyForURL(url, host) {{\n\
+             if (shExpMatch(host, \"*.public\")) return \"DIRECT\";\n\
+             return \"PROXY 127.0.0.1:{}\";\n\
+             }}",
+            proxy.port()
+        ),
+    );
+    let config = Config {
+        pac_file: Some(pac.clone()),
+        ..Config::default()
+    };
+    let client = HttpClient::new(&config);
+    let request = Request::get(parse_url(&format!("http://{page}/")).unwrap());
+    assert!(client.fetch(request).await.is_err());
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "PAC PROXY decision must dial the proxy"
+    );
+    let _ = std::fs::remove_file(pac);
+}

@@ -462,3 +462,29 @@ fn table_colspan_spans_columns() {
     assert!((span.width - 300.0).abs() < 0.5, "{span:?}");
     assert_eq!(span.x, 0.0);
 }
+
+#[test]
+fn mathml_fraction_stacks_numerator_above_denominator() {
+    let html = "<html><body style=\"margin:0\"><math><mfrac id=\"f\"><mn>1</mn><mn>2</mn></mfrac></math></body></html>";
+    let result = layout(html, 800.0, 400.0);
+    let page = Page::from_html(url::Url::parse("https://layout.test/").unwrap(), html);
+    let fraction = page.select("#f").unwrap().unwrap();
+    let rect = result
+        .node_rects
+        .get(&fraction)
+        .copied()
+        .expect("fraction rect");
+    assert!(rect.height > 10.0, "fraction height {}", rect.height);
+    let numbers = page.select_all("mn").unwrap();
+    assert_eq!(numbers.len(), 2);
+    let numerator = result.node_rects.get(&numbers[0]).copied().unwrap();
+    let denominator = result.node_rects.get(&numbers[1]).copied().unwrap();
+    assert!(
+        denominator.y > numerator.y + numerator.height - 0.5,
+        "denominator must sit below the rule: {numerator:?} {denominator:?}"
+    );
+    assert!(
+        (denominator.x - numerator.x).abs() < 1.0,
+        "numerator and denominator align"
+    );
+}

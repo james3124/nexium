@@ -5,6 +5,7 @@ pub mod cache;
 pub mod client;
 pub mod compression;
 pub mod cookies;
+pub mod pac;
 pub mod ssrf;
 
 pub use bypass::ProxyBypass;

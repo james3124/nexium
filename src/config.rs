@@ -34,6 +34,9 @@ pub struct Config {
     pub javascript_max_runtime_ms: u64,
     /// HTTP proxy URL, e.g. `http://127.0.0.1:8080` (CONNECT tunneling).
     pub proxy: Option<String>,
+    /// Path to a PAC (proxy auto-config) file. Its routing decisions take
+    /// precedence over `proxy`; unsupported JavaScript falls through.
+    pub pac_file: Option<PathBuf>,
     /// Hosts that connect directly even when `proxy` is set (`no_proxy`).
     ///
     /// Entries may be hostnames, `.suffix` / `*.wildcard` domains, exact IPs,
@@ -93,6 +96,7 @@ impl Default for Config {
             javascript_enabled: true,
             javascript_max_runtime_ms: 2000,
             proxy: None,
+            pac_file: None,
             no_proxy: Vec::new(),
             api_bind: "127.0.0.1:9222".to_owned(),
             api_token: None,

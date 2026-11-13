@@ -12,7 +12,7 @@ use crate::engine::css::{
     Display, Edges, FlexWrap, GridPlacement, GridTrack, JustifyContent, Length, Overflow, Position,
     StyleResolver, TextAlign, Viewport, WhiteSpace, parse_declaration_list,
 };
-use crate::engine::dom::{Document, NodeData, NodeId};
+use crate::engine::dom::{Document, Namespace, NodeData, NodeId};
 use crate::engine::text::FontSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -408,6 +408,14 @@ impl<'a> LayoutEngine<'a> {
 
         let content_x = layout.content_x();
         let content_y = layout.content_y();
+
+        if self.doc.element(node).is_some_and(|element| {
+            element.namespace == Namespace::MathMl && element.name.eq_ignore_ascii_case("mfrac")
+        }) && let Some(fraction) =
+            self.layout_math_fraction(node, &style, content_width, &layout)
+        {
+            return fraction;
+        }
 
         let intrinsic_noncontent =
             layout.border.top + layout.border.bottom + layout.padding.top + layout.padding.bottom;
@@ -2678,6 +2686,93 @@ impl<'a> LayoutEngine<'a> {
             let _ = max_item_width;
             (boxes, height)
         }
+    }
+
+    /// Minimal `mfrac` layout: numerator, rule and denominator stacked.
+    fn layout_math_fraction(
+        &mut self,
+        node: NodeId,
+        style: &Arc<ComputedStyle>,
+        content_width: f32,
+        parent: &LayoutBox,
+    ) -> Option<LayoutBox> {
+        let children: Vec<NodeId> = self
+            .doc
+            .children(node)
+            .iter()
+            .copied()
+            .filter(|&child| self.doc.element(child).is_some())
+            .collect();
+        if children.len() < 2 {
+            return None;
+        }
+        let mut boxes = Vec::new();
+        for &child in children.iter().take(2) {
+            let child_style = self.style_for(child, style, self.root_font_size);
+            if child_style.display == Display::None {
+                continue;
+            }
+            boxes.push(self.layout_element(
+                child,
+                child_style,
+                content_width,
+                parent.content_x(),
+                parent.content_y(),
+                Some(content_width),
+            ));
+        }
+        if boxes.len() != 2 {
+            return None;
+        }
+        let mut numerator = boxes.remove(0);
+        let mut denominator = boxes.remove(0);
+        let gap = 2.0;
+        let bar_height = 1.5;
+        let numerator_height = numerator.margin_box_height();
+        let denominator_height = denominator.margin_box_height();
+        let content_height = numerator_height + gap + bar_height + gap + denominator_height;
+
+        let numerator_offset = parent.content_y() - numerator.rect.y;
+        shift_box(&mut numerator, 0.0, numerator_offset);
+        let mut bar_style = ComputedStyle::initial();
+        bar_style.background_color = crate::engine::css::Color::BLACK;
+        let bar = LayoutBox {
+            node: None,
+            kind: BoxKind::AnonymousBlock,
+            style: Arc::new(bar_style),
+            rect: Rect {
+                x: parent.content_x(),
+                y: parent.content_y() + numerator_height + gap,
+                width: content_width,
+                height: bar_height,
+            },
+            margin: Edges::<f32>::ZERO,
+            border: Edges::<f32>::ZERO,
+            padding: Edges::<f32>::ZERO,
+            children: Vec::new(),
+            lines: Vec::new(),
+            atomics: Vec::new(),
+            image: None,
+            text: None,
+            content_height: bar_height,
+        };
+        let denominator_offset =
+            parent.content_y() + numerator_height + gap + bar_height + gap - denominator.rect.y;
+        shift_box(&mut denominator, 0.0, denominator_offset);
+
+        let mut fraction = parent.clone();
+        fraction.children.clear();
+        fraction.kind = BoxKind::Block;
+        fraction.children.push(numerator);
+        fraction.children.push(bar);
+        fraction.children.push(denominator);
+        fraction.content_height = content_height;
+        fraction.rect.height = content_height
+            + parent.padding.top
+            + parent.padding.bottom
+            + parent.border.top
+            + parent.border.bottom;
+        Some(fraction)
     }
 
     /// Expand `auto-fit`/`auto-fill` repetitions for a given container width.

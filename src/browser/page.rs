@@ -36,7 +36,8 @@ pub struct Page {
 
 impl Page {
     pub async fn load(client: &HttpClient, url: Url) -> Result<Self> {
-        let request = Request::get(url).header("Accept", ACCEPT_HTML)?;
+        let mut request = Request::get(url).header("Accept", ACCEPT_HTML)?;
+        request.navigation = true;
         Self::load_request(client, request).await
     }
 
@@ -52,14 +53,16 @@ impl Page {
     /// Build a top-level navigation request for `url`: an HTML GET, or a
     /// form-encoded POST when `method` is `post`.
     pub fn navigation_request(url: Url, method: &str, body: Option<&str>) -> Result<Request> {
-        if method.eq_ignore_ascii_case("post") {
-            Ok(Request::new(hyper::Method::POST, url)
+        let mut request = if method.eq_ignore_ascii_case("post") {
+            Request::new(hyper::Method::POST, url)
                 .header("Accept", ACCEPT_HTML)?
                 .header("Content-Type", "application/x-www-form-urlencoded")?
-                .body(body.unwrap_or_default().to_owned()))
+                .body(body.unwrap_or_default().to_owned())
         } else {
-            Ok(Request::get(url).header("Accept", ACCEPT_HTML)?)
-        }
+            Request::get(url).header("Accept", ACCEPT_HTML)?
+        };
+        request.navigation = true;
+        Ok(request)
     }
 
     pub fn from_response(response: Response) -> Self {

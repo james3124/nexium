@@ -44,22 +44,25 @@ inspectable DOM.
 ### Phase 1 remaining gaps (tracked)
 
 - The adoption agency implements the WHATWG outer/inner loops, bookmark
-  handling and clone/re-parent steps; its "in scope" check is approximated by
-  stack membership, so exotic misnesting across foreign or template content
-  may still differ from a full browser.
+  handling, clone/re-parent steps and the real "has an element in scope"
+  check with HTML/MathML/SVG scope boundaries.
 - Foreign content reaches the DOM with qualified attribute namespaces
   (`xlink:`, `xml:`, `xmlns:` and custom `xmlns` bindings), namespace-aware
-  lookup and round-trip serialization. Basic SVG painting exists; MathML is
-  still not painted.
+  lookup and round-trip serialization. SVG painting exists, and MathML is
+  painted as a text-oriented fallback (no full math layout/scripts/fractions).
 - Cookie and cache persistence and profile isolation were delivered in
-  Phase 4. SameSite enforcement and public-suffix rejection are implemented,
-  but same-site is derived from registrable domains and top-level navigation
-  is inferred from GET + HTML `Accept`. Fresh-GET cache entries revalidate
-  with `ETag`/`Last-Modified` and reuse the body on 304.
-- Proxies support HTTP CONNECT and SOCKS5/SOCKS5H (optional username/password)
-  plus `no_proxy` bypass lists (hostnames, domain suffixes, wildcards, IPv4/
-  IPv6 CIDR, `host:port`, `*`, env fallback). PAC files and proxy
-  auto-configuration are not implemented. HTTP/3 is deferred to a later
+  Phase 4. SameSite enforcement and public-suffix rejection are implemented;
+  top-level navigations carry an explicit request flag and same-site is
+  derived from registrable domains.
+  Fresh-GET cache entries revalidate with `ETag`/`Last-Modified` and reuse the
+  body on 304.
+- Proxies support HTTP CONNECT and SOCKS5/SOCKS5H (optional username/password),
+  `no_proxy` bypass lists (hostnames, domain suffixes, wildcards, IPv4/IPv6
+  CIDR, `host:port`, `*`, env fallback) and PAC files using the common
+  `FindProxyForURL` executed through Boa with the standard PAC functions
+  (`shExpMatch`, `dnsDomainIs`, `isPlainHostName`, `isInNet`, `dnsResolve`,
+  `dnsDomainLevels`, `myIpAddress`) and PROXY/SOCKS5/SOCKS5H/DIRECT
+  directives, with a pattern fallback if the script fails. HTTP/3 is deferred to a later
   milestone per the project brief.
 
 ## Phase 2 — CSS and Layout (complete)
@@ -243,6 +246,9 @@ browser window, using viewport coordinates and live DOM events.
   MCP JSON-RPC POST plus SSE transport.
 - [x] Live `browser_evaluate`, network request log, page extraction and
   configurable screenshot formats.
+- [x] Native WebDriver subset (`/session`, navigation, CSS element
+  find/click/keys, execute, screenshot) and CDP subset (`/json/*` discovery,
+  `/devtools/page/{id}` WebSocket, Browser/Target/Page/Runtime domains).
 
 Deliverable achieved: external AI agents can control NexiumX through REST,
 WebSocket or MCP without internal Rust access.

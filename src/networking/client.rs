@@ -32,6 +32,7 @@ use super::bypass::ProxyBypass;
 use super::cache::{CacheLookup, HttpCache};
 use super::compression::decode_body;
 use super::cookies::CookieJar;
+use super::pac::{PacRoute, PacScript, RouteKind};
 use super::ssrf;
 use crate::config::Config;
 use crate::utils::{NxError, Result};
@@ -51,6 +52,8 @@ pub struct Request {
     pub body: Bytes,
     pub timeout: Option<Duration>,
     pub max_redirects: Option<usize>,
+    /// True for top-level document navigations (affects SameSite cookies).
+    pub navigation: bool,
 }
 
 impl Request {
@@ -62,6 +65,7 @@ impl Request {
             body: Bytes::new(),
             timeout: None,
             max_redirects: None,
+            navigation: false,
         }
     }
 
@@ -619,12 +623,7 @@ impl HttpClient {
 /// Approximation used for `SameSite=Lax`: a request counts as a top-level
 /// navigation when it is a safe `GET` asking for an HTML document.
 fn is_navigation_request(request: &Request) -> bool {
-    request.method == Method::GET
-        && request
-            .headers
-            .get(ACCEPT)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+    request.navigation
 }
 
 /// Merge `304 Not Modified` headers into the stored representation's headers.
@@ -673,6 +672,7 @@ fn same_origin(a: &Url, b: &Url) -> bool {
 struct Connector {
     direct: HttpConnector,
     proxy: Option<ProxyConfig>,
+    pac: Option<Arc<PacScript>>,
     bypass: Arc<ProxyBypass>,
     pinned: PinnedAddresses,
 }
@@ -685,6 +685,13 @@ impl Connector {
         Self {
             direct,
             proxy: config.proxy.as_deref().and_then(parse_proxy),
+            pac: config.pac_file.as_deref().and_then(|path| {
+                let script = PacScript::load(path);
+                if script.is_none() {
+                    warn!("could not load PAC file {}", path.display());
+                }
+                script.map(Arc::new)
+            }),
             bypass: Arc::new(ProxyBypass::from_config(config)),
             pinned,
         }
@@ -701,7 +708,8 @@ impl Service<hyper::Uri> for Connector {
     }
 
     fn call(&mut self, destination: hyper::Uri) -> Self::Future {
-        let proxy = self.proxy.clone();
+        let static_proxy = self.proxy.clone();
+        let pac = self.pac.clone();
         let bypass = Arc::clone(&self.bypass);
         let pinned = Arc::clone(&self.pinned);
         let mut direct = self.direct.clone();
@@ -709,6 +717,24 @@ impl Service<hyper::Uri> for Connector {
             let (host, port) = destination_host_port(&destination)
                 .ok_or_else(|| connector_error("missing destination host"))?;
 
+            let scheme = destination.scheme_str().unwrap_or("http");
+            let authority = destination
+                .authority()
+                .map(|authority| authority.as_str().to_owned())
+                .unwrap_or_else(|| host.clone());
+            let pac_url = format!("{scheme}://{authority}");
+            let proxy = match pac.as_deref() {
+                Some(script) => match script.route_with_url(&pac_url, &host) {
+                    PacRoute::Direct => None,
+                    PacRoute::Proxy {
+                        kind,
+                        host: proxy_host,
+                        port: proxy_port,
+                    } => Some(proxy_from_route(kind, proxy_host, proxy_port)),
+                    PacRoute::Default => static_proxy.clone(),
+                },
+                None => static_proxy.clone(),
+            };
             if let Some(proxy) = proxy
                 && !bypass.matches(&host, Some(port))
             {
@@ -1070,6 +1096,22 @@ fn build_connector(
         .enable_http1()
         .enable_http2()
         .wrap_connector(Connector::new(config, pinned))
+}
+
+fn proxy_from_route(kind: RouteKind, host: String, port: u16) -> ProxyConfig {
+    let kind = match kind {
+        RouteKind::HttpConnect => ProxyKind::HttpConnect,
+        RouteKind::Socks5 => ProxyKind::Socks5 { remote_dns: false },
+        RouteKind::Socks5h => ProxyKind::Socks5 { remote_dns: true },
+    };
+    ProxyConfig {
+        host,
+        port,
+        kind,
+        authorization: None,
+        username: None,
+        password: None,
+    }
 }
 
 fn parse_proxy(raw: &str) -> Option<ProxyConfig> {

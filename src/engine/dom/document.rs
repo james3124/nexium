@@ -452,6 +452,11 @@ impl Document {
         serialize::serialize_node(self, id)
     }
 
+    /// Serialize a single node and its subtree.
+    pub fn serialize_node(&self, id: NodeId) -> String {
+        serialize::serialize_node(self, id)
+    }
+
     pub fn serialize(&self) -> String {
         serialize::serialize_document(self)
     }

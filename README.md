@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/NexiumX.png" alt="NexiumX logo" width="280" />
+
 # NexiumX
 
 **The headless browser engine written from scratch, in Rust.**
@@ -60,15 +62,15 @@ Or download a release archive directly:
 
 | Platform | Archive |
 |---|---|
-| Linux x86_64 | `nexium-v0.8.2-linux-x64.tar.gz` |
-| Linux arm64 | `nexium-v0.8.2-linux-arm64.tar.gz` |
-| macOS arm64 | `nexium-v0.8.2-darwin-arm64.tar.gz` |
-| macOS x86_64 | `nexium-v0.8.2-darwin-x64.tar.gz` |
-| Windows x86_64 | `nexium-v0.8.2-win32-x64.tar.gz` |
+| Linux x86_64 | `nexium-v0.8.3-linux-x64.tar.gz` |
+| Linux arm64 | `nexium-v0.8.3-linux-arm64.tar.gz` |
+| macOS arm64 | `nexium-v0.8.3-darwin-arm64.tar.gz` |
+| macOS x86_64 | `nexium-v0.8.3-darwin-x64.tar.gz` |
+| Windows x86_64 | `nexium-v0.8.3-win32-x64.tar.gz` |
 
 ```bash
 curl -L -o nexium.tar.gz \
-  https://github.com/james3124/nexium/releases/download/v0.8.2/nexium-v0.8.2-linux-x64.tar.gz
+  https://github.com/james3124/nexium/releases/download/v0.8.3/nexium-v0.8.3-linux-x64.tar.gz
 tar -xzf nexium.tar.gz
 ./nexium --version
 ```
@@ -155,12 +157,45 @@ curl -X POST http://127.0.0.1:9222/browser/snapshot \
 Endpoints: `/health`, `/browser/{create,close,status,navigate,back,forward,
 reload,click,type,press,scroll,hover,screenshot,snapshot,extract,evaluate,
 tabs,tabs/create,tabs/close,tabs/switch,session/save,session/restore,network,
-console}`, `/ws`, `/v1/audit`, `/v1/admin/tokens*`.
+console,dom}`, `/ws`, `/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
+adapters share the same engine — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
 
 Responses use `{"ok":true,"data":...}` or structured errors. Authentication
 uses `Authorization: Bearer <token>`; requests select an agent with
 `X-Nexium-Agent` and a session with `X-Nexium-Session`. Browser-based MCP
 inspectors are supported through loopback-origin CORS.
+
+### WebDriver and CDP
+
+Both browser-automation protocols are implemented in-process (no external
+driver binary):
+
+- **W3C WebDriver subset** — `GET /status`, `POST /session`, `WS /session`
+  (WebDriver BiDi: session/browsingContext/script modules, navigation and
+  network/log events),
+  `DELETE /session/{id}`, `GET|POST /session/{id}/url`, `title`, `source`,
+  `screenshot`, `POST element`/`elements` (CSS selector), element
+  `click`/`text`/`value`, `execute/sync`, `back`/`forward`/`refresh`,
+  `window`, `window/handles`, `timeouts`.
+- **Chrome DevTools Protocol subset** — discovery at `/json/version`,
+  `/json/list`, `/json/new`; WebSocket at `/devtools/page/{id}` and
+  `/devtools/browser`. Domains: `Browser`, `Target` (list/create/close/
+  attach, flattened sessions), `Page` (navigate/reload/captureScreenshot/
+  getLayoutMetrics/getFrameTree/getNavigationHistory), `Runtime` (evaluate/
+  callFunctionOn with objectIds), `DOM` (full tree, querySelector(All),
+  outerHTML, attributes, box model, resolveNode/focus), `Input` (mouse,
+  keys, insertText), `Emulation`, plus navigation-triggered `Network`
+  events. Full command matrix: [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
+
+```bash
+# WebDriver
+curl -X POST http://127.0.0.1:9222/session -d '{"capabilities":{}}'
+curl http://127.0.0.1:9222/status
+
+# CDP discovery
+curl http://127.0.0.1:9222/json/version
+curl -X PUT 'http://127.0.0.1:9222/json/new?url=https://example.com'
+```
 
 ### HTTPS
 

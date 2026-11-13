@@ -208,6 +208,80 @@ impl Browser {
         self.with_page_session(|session| session.find(selector))
     }
 
+    pub fn elements(&mut self, selector: &str) -> Result<Vec<ElementInfo>> {
+        self.with_page_session(|session| {
+            session
+                .page()
+                .select_all(selector)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|node| session.element_info(node))
+                .collect()
+        })
+    }
+
+    pub fn element_info_node(&mut self, index: usize) -> Result<Option<ElementInfo>> {
+        self.with_page_session(|session| {
+            session.element_info(crate::engine::dom::NodeId::from_index(index))
+        })
+    }
+
+    pub fn node_outer_html(&mut self, index: usize) -> Result<Option<String>> {
+        self.with_page_session(|session| {
+            let document = &session.page().document;
+            if index >= document.node_count() {
+                return None;
+            }
+            Some(document.serialize_node(crate::engine::dom::NodeId::from_index(index)))
+        })
+    }
+
+    pub fn node_attributes(&mut self, index: usize) -> Result<Vec<(String, String)>> {
+        self.with_page_session(|session| {
+            let document = &session.page().document;
+            document
+                .element(crate::engine::dom::NodeId::from_index(index))
+                .map(|element| {
+                    element
+                        .attributes
+                        .iter()
+                        .map(|attribute| (attribute.name.clone(), attribute.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    pub fn node_query_in(&mut self, root: usize, selector: &str, all: bool) -> Result<Vec<usize>> {
+        self.with_page_session(|session| {
+            let document = &session.page().document;
+            let root = crate::engine::dom::NodeId::from_index(root);
+            let nodes = if all {
+                document
+                    .query_selector_all(root, selector)
+                    .unwrap_or_default()
+            } else {
+                document
+                    .query_selector(root, selector)
+                    .ok()
+                    .flatten()
+                    .into_iter()
+                    .collect()
+            };
+            nodes.into_iter().map(|node| node.index()).collect()
+        })
+    }
+
+    /// Build a unique CSS selector path (`div:nth-of-type(2) > a`) for a node.
+    pub fn node_selector(&mut self, index: usize) -> Result<Option<String>> {
+        self.with_page_session(|session| {
+            node_selector_path(
+                &session.page().document,
+                crate::engine::dom::NodeId::from_index(index),
+            )
+        })
+    }
+
     pub fn scroll_element_into_view(&mut self, selector: &str) -> Result<bool> {
         self.with_page_session(|session| {
             let Some(node) = session.page().select(selector).ok().flatten() else {
@@ -686,4 +760,41 @@ impl Drop for Browser {
             let _ = self.save_session(&profile.session_path());
         }
     }
+}
+
+fn node_selector_path(
+    doc: &crate::engine::dom::Document,
+    node: crate::engine::dom::NodeId,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if id == doc.document_node() {
+            break;
+        }
+        let tag = doc.tag_name(id)?;
+        if let Some(existing) = doc.get_attribute(id, "id") {
+            parts.push(format!("#{existing}"));
+            break;
+        }
+        let parent = doc.parent(id)?;
+        let mut total = 0usize;
+        let mut position = 0usize;
+        for &sibling in doc.children(parent) {
+            if doc.tag_name(sibling) == Some(tag) {
+                total += 1;
+                if sibling == id {
+                    position = total;
+                }
+            }
+        }
+        parts.push(if total > 1 {
+            format!("{tag}:nth-of-type({position})")
+        } else {
+            tag.to_owned()
+        });
+        current = Some(parent);
+    }
+    parts.reverse();
+    (!parts.is_empty()).then(|| parts.join(" > "))
 }

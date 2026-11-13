@@ -927,6 +927,38 @@ impl<'a> Parser<'a> {
         let _ = self.doc.append_child(target, node);
     }
 
+    /// WHATWG "has an element in scope": walk down the stack until the target
+    /// or a scope-boundary element is found.
+    fn has_in_scope(&self, target: NodeId) -> bool {
+        for &node in self.stack.iter().rev() {
+            if node == target {
+                return true;
+            }
+            if self.is_scope_boundary(node) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn is_scope_boundary(&self, node: NodeId) -> bool {
+        let Some(element) = self.doc.element(node) else {
+            return false;
+        };
+        let named = |names: &[&str]| {
+            names
+                .iter()
+                .any(|name| element.name.eq_ignore_ascii_case(name))
+        };
+        match element.namespace {
+            Namespace::Html => named(&[
+                "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template",
+            ]),
+            Namespace::MathMl => named(&["mi", "mo", "mn", "ms", "mtext", "annotation-xml"]),
+            Namespace::Svg => named(&["foreignObject", "desc", "title"]),
+        }
+    }
+
     /// The WHATWG adoption agency algorithm for formatting end tags.
     ///
     /// Walks the marker-delimited list of active formatting elements looking
@@ -969,7 +1001,11 @@ impl<'a> Parser<'a> {
                 self.active_formatting.remove(position);
                 return true;
             };
-            // Step 4.5 (scope) is approximated by "still on the stack".
+            // Step 4.5: the formatting element must still be in scope.
+            if !self.has_in_scope(formatting_node) {
+                self.active_formatting.remove(position);
+                return true;
+            }
             if stack_index == 0 {
                 self.active_formatting.remove(position);
                 return true;

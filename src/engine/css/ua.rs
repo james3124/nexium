@@ -63,6 +63,17 @@ colgroup, col { display: none; }
 th { font-weight: bold; }
 fieldset { display: block; margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 1px solid #cccccc; }
 legend { padding: 0 2px; }
+
+/* MathML: text-oriented fallback rendering (no full math layout). */
+math, mrow, mfrac, msqrt, mroot, mtable, mtr, mtd, mstyle, merror,
+mpadded, mphantom, menclose, semantics { display: block; }
+math { margin: 0.2em 0; font-family: serif; }
+mi, mo, mn, ms, mtext { display: inline; font-family: serif; }
+mo { padding: 0 0.15em; }
+mfrac, msqrt, mroot, msub, msup, msubsup, munder, mover, munderover {
+    display: inline-block;
+}
+annotation, annotation-xml { display: none; }
 "#;
 
 pub fn user_agent_stylesheet() -> &'static Stylesheet {
