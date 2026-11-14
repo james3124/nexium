@@ -22,6 +22,7 @@ use super::service::{
 
 const AGENT: &str = "bidi";
 
+#[allow(clippy::result_large_err)]
 fn auth(
     service: &ApiService,
     headers: &HeaderMap,

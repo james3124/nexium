@@ -45,11 +45,9 @@ impl Family {
     }
 }
 
-pub struct FontSet {
-    sans: FontPair,
-    serif: FontPair,
-    mono: FontPair,
-}
+/// Embedded font families. Each family is parsed lazily on first use so a
+/// sans-serif-only page never pays for serif/mono glyph data.
+pub struct FontSet;
 
 struct FontPair {
     regular: Font,
@@ -75,42 +73,53 @@ impl FontPair {
     }
 }
 
+fn sans_pair() -> &'static FontPair {
+    static PAIR: OnceLock<FontPair> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        FontPair::load(
+            &include_bytes!("../../assets/fonts/DejaVuSans.ttf")[..],
+            &include_bytes!("../../assets/fonts/DejaVuSans-Bold.ttf")[..],
+        )
+    })
+}
+
+fn serif_pair() -> &'static FontPair {
+    static PAIR: OnceLock<FontPair> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        FontPair::load(
+            &include_bytes!("../../assets/fonts/DejaVuSerif.ttf")[..],
+            &include_bytes!("../../assets/fonts/DejaVuSerif-Bold.ttf")[..],
+        )
+    })
+}
+
+fn mono_pair() -> &'static FontPair {
+    static PAIR: OnceLock<FontPair> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        FontPair::load(
+            &include_bytes!("../../assets/fonts/DejaVuSansMono.ttf")[..],
+            &include_bytes!("../../assets/fonts/DejaVuSansMono-Bold.ttf")[..],
+        )
+    })
+}
+
 impl Default for FontSet {
     fn default() -> Self {
-        Self::load()
+        Self
     }
 }
 
 impl FontSet {
-    /// Parsed once per process: font parsing is expensive and layout runs on
-    /// every interaction.
     pub fn embedded() -> &'static FontSet {
-        static EMBEDDED: OnceLock<FontSet> = OnceLock::new();
-        EMBEDDED.get_or_init(FontSet::load)
-    }
-
-    fn load() -> Self {
-        Self {
-            sans: FontPair::load(
-                &include_bytes!("../../assets/fonts/DejaVuSans.ttf")[..],
-                &include_bytes!("../../assets/fonts/DejaVuSans-Bold.ttf")[..],
-            ),
-            serif: FontPair::load(
-                &include_bytes!("../../assets/fonts/DejaVuSerif.ttf")[..],
-                &include_bytes!("../../assets/fonts/DejaVuSerif-Bold.ttf")[..],
-            ),
-            mono: FontPair::load(
-                &include_bytes!("../../assets/fonts/DejaVuSansMono.ttf")[..],
-                &include_bytes!("../../assets/fonts/DejaVuSansMono-Bold.ttf")[..],
-            ),
-        }
+        static EMBEDDED: FontSet = FontSet;
+        &EMBEDDED
     }
 
     pub fn font_for(&self, style: &ComputedStyle) -> &Font {
         let pair = match Family::for_style(style) {
-            Family::Sans => &self.sans,
-            Family::Serif => &self.serif,
-            Family::Mono => &self.mono,
+            Family::Sans => sans_pair(),
+            Family::Serif => serif_pair(),
+            Family::Mono => mono_pair(),
         };
         pair.font(style.font_weight)
     }

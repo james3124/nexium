@@ -166,7 +166,7 @@ pub async fn render_page(
     let started = Instant::now();
     let image = paint_document(
         &layout,
-        &fonts,
+        fonts,
         &images,
         &page.canvases,
         &page.document,

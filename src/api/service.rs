@@ -560,6 +560,9 @@ impl ApiService {
             }
             removed += 1;
         }
+        if removed > 0 {
+            release_heap();
+        }
         removed
     }
 
@@ -567,6 +570,7 @@ impl ApiService {
         let entry = self.resolve(auth, Some(id)).await?;
         self.emit("session_closed", Some(&entry.id), json!({}));
         self.sessions.write().await.remove(&entry.id);
+        release_heap();
         if let Ok(mut owners) = self.owners.lock() {
             owners.remove(&entry.id);
         }
@@ -1645,6 +1649,14 @@ fn dom_node_json(doc: &Document, id: NodeId) -> Value {
     Value::Object(object)
 }
 
+/// Return freed allocator arenas to the OS after sessions are dropped.
+fn release_heap() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        let _ = libc::malloc_trim(0);
+    }
+}
+
 pub fn session_status(entry: &SessionEntry, browser: &Browser) -> Value {
     let active = browser.active_tab();
     json!({
@@ -1664,6 +1676,7 @@ pub fn session_status(entry: &SessionEntry, browser: &Browser) -> Value {
         "page": page_summary(browser),
         "console_count": active.map(|tab| tab.page.as_ref().map(|page| page.console.len()).unwrap_or(0)),
         "error_count": active.map(|tab| tab.page.as_ref().map(|page| page.script_errors.len()).unwrap_or(0)),
+        "memory": crate::utils::memory::usage_json(),
     })
 }
 

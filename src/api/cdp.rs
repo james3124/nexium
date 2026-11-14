@@ -54,6 +54,7 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn auth(
     service: &ApiService,
     headers: &HeaderMap,

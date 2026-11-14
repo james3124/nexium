@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::Router;
 use axum::extract::{FromRequest, Path, Query, Request, State};
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::{ACCEPT, AUTHORIZATION, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -74,6 +74,7 @@ pub fn router(service: Arc<ApiService>) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/memory", get(memory))
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth_protected_resource),
@@ -395,7 +396,16 @@ async fn health(State(service): State<Arc<ApiService>>) -> Response {
             "version": crate::VERSION,
             "api": true,
             "auth_required": service.auth_required(),
+            "memory": crate::utils::memory::usage_json(),
         }
+    }))
+    .into_response()
+}
+
+async fn memory() -> Response {
+    Json(json!({
+        "ok": true,
+        "data": crate::utils::memory::usage_json(),
     }))
     .into_response()
 }
@@ -714,6 +724,23 @@ async fn mcp_endpoint(
 /// Streamable HTTP transport: the client opens `GET /mcp` with
 /// `Accept: text/event-stream` for server-to-client messages.
 async fn mcp_stream(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
+    let accept = headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !accept.contains("text/event-stream") {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "ok": false,
+                "error": {
+                    "code": "method_not_allowed",
+                    "message": "MCP Streamable HTTP stream requires Accept: text/event-stream; send JSON-RPC with POST /mcp"
+                }
+            })),
+        )
+            .into_response();
+    }
     if let Err(error) = auth_context(&service, &headers) {
         return respond(Err(error));
     }

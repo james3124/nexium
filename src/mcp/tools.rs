@@ -129,6 +129,13 @@ fn tool(name: &str, description: &str, properties: Map<String, Value>) -> Value 
     })
 }
 
+fn required(mut tool: Value, names: &[&str]) -> Value {
+    if let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) {
+        schema.insert("required".to_owned(), json!(names));
+    }
+    tool
+}
+
 fn session_property(properties: &mut Map<String, Value>) {
     properties.insert(
         "session_id".to_owned(),
@@ -166,7 +173,10 @@ pub fn tool_definitions() -> Vec<Value> {
     let mut properties = Map::new();
     properties.insert(
         "url".to_owned(),
-        json!({ "type": "string", "description": "Initial URL to load." }),
+        json!({
+            "type": "string",
+            "description": "Initial URL to load. Must be a concrete, valid absolute URL; omit to create a blank session. Never pass a malformed or placeholder URL."
+        }),
     );
     properties.insert(
         "profile".to_owned(),
@@ -205,12 +215,18 @@ pub fn tool_definitions() -> Vec<Value> {
     session_property(&mut properties);
     properties.insert(
         "url".to_owned(),
-        json!({ "type": "string", "description": "URL to navigate the active tab to." }),
+        json!({
+            "type": "string",
+            "description": "Absolute http(s) URL to load. Must be concrete and valid; never pass a malformed, placeholder, or relative value."
+        }),
     );
-    tools.push(tool(
-        "browser_navigate",
-        "Navigate the active tab to a URL and return page metadata.",
-        properties,
+    tools.push(required(
+        tool(
+            "browser_navigate",
+            "Navigate the active tab to a concrete, absolute http(s) URL and return page metadata. Call only when a complete, valid URL was provided; if the URL is missing, malformed, or a placeholder, do not call this tool—explain the problem and ask for a valid URL instead.",
+            properties,
+        ),
+        &["url"],
     ));
 
     let mut properties = Map::new();
@@ -234,10 +250,13 @@ pub fn tool_definitions() -> Vec<Value> {
         json!({ "type": "string", "description": "Text to type into the focused input." }),
     );
     selector_property(&mut properties);
-    tools.push(tool(
-        "browser_type",
-        "Type text into the focused input/textarea, optionally focusing an element first.",
-        properties,
+    tools.push(required(
+        tool(
+            "browser_type",
+            "Type text into the focused input/textarea, optionally focusing an element first.",
+            properties,
+        ),
+        &["text"],
     ));
 
     let mut properties = Map::new();
@@ -246,10 +265,13 @@ pub fn tool_definitions() -> Vec<Value> {
         "key".to_owned(),
         json!({ "type": "string", "description": "Key name, e.g. Enter, Backspace, ArrowDown, a." }),
     );
-    tools.push(tool(
-        "browser_press",
-        "Press a keyboard key on the focused element.",
-        properties,
+    tools.push(required(
+        tool(
+            "browser_press",
+            "Press a keyboard key on the focused element.",
+            properties,
+        ),
+        &["key"],
     ));
 
     let mut properties = Map::new();
@@ -391,12 +413,18 @@ pub fn tool_definitions() -> Vec<Value> {
     session_property(&mut properties);
     properties.insert(
         "script".to_owned(),
-        json!({ "type": "string", "description": "JavaScript expression to evaluate in the page." }),
+        json!({
+            "type": "string",
+            "description": "JavaScript expression to evaluate in the page. Required and must not be empty."
+        }),
     );
-    tools.push(tool(
-        "browser_evaluate",
-        "Evaluate JavaScript in the live page runtime and return a JSON value.",
-        properties,
+    tools.push(required(
+        tool(
+            "browser_evaluate",
+            "Evaluate JavaScript in the live page runtime and return a JSON value.",
+            properties,
+        ),
+        &["script"],
     ));
 
     let mut properties = Map::new();

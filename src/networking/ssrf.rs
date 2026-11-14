@@ -17,11 +17,11 @@
 //! client and keyed by `host:port`, so later requests to the same authority
 //! reuse the first validated answer.
 //!
-//! Pinning cannot be applied when the connection is made by a proxy: an HTTP
-//! CONNECT proxy and `socks5h://` resolve the destination themselves, and even
-//! `socks5://` (local DNS) resolves again inside the handshake. In those modes
-//! the pre-resolve check still runs, but a proxy-side rebinding window remains.
-//! Use bypass/`no_proxy` rules to keep sensitive hosts off third-party proxies.
+//! Pinning is also applied through proxies when blocking is enabled: HTTP
+//! CONNECT targets the pinned IP instead of the hostname, and SOCKS5H is
+//! downgraded to send that IP rather than let the proxy resolve. A malicious
+//! proxy can still ignore the tunnel target, so sensitive hosts should stay
+//! off untrusted proxies via bypass/`no_proxy` rules.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -102,8 +102,8 @@ pub fn is_blocked_host(host: &str) -> bool {
 }
 
 /// Resolve `host:port` and reject the target when any resolved address is
-/// blocked. Returns all resolved addresses so the caller can pin them for the
-/// connection, closing the rebinding window on the direct (non-proxy) path.
+/// blocked. Returns all resolved addresses so the caller can pin them for
+/// direct connections and proxy tunnels.
 pub async fn resolve_and_validate(
     host: &str,
     port: u16,

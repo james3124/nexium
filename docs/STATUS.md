@@ -18,9 +18,10 @@ limitations and licensing details. Product overview and usage live in
   (via `encoding_rs`, covering Windows-1252, GBK, Shift_JIS and others).
 - HTML tokenizer and tree builder: tags, attributes, comments, doctypes, the
   full WHATWG named character reference table, RCDATA/RAWTEXT/script, implied
-  elements, void elements, quirks-mode detection, templates with detached
-  content fragments, and SVG/MathML foreign content (namespaces, case
-  restoration, self-closing tags, HTML integration points and breakout).
+  elements, void elements, quirks-mode detection, table foster parenting,
+  templates with detached content fragments, and SVG/MathML foreign content
+  (namespaces, case restoration, self-closing tags, HTML integration points
+  and breakout).
 - Formatting-element reconstruction and the WHATWG adoption agency for
   misnested inline markup, including the outer/inner loops, bookmarks,
   clone/re-parent steps and scope-boundary-aware "in scope" checks.
@@ -141,6 +142,10 @@ limitations and licensing details. Product overview and usage live in
   page-load path.
 - Hover tracks the hit element for `:hover` styling and dispatches trusted
   synthetic events; text selection over focused editable content is exposed.
+- Memory reporting: `GET /memory`, `/health.memory` and
+  `browser_status.memory` expose process RSS/VSZ/threads and system memory.
+- Memory behavior: font families load lazily (only the families a page uses),
+  and freed allocator arenas are trimmed when sessions close on GNU targets.
 - Screenshots: full page, scrolled viewport crops and element crops.
 - Accessibility tree extraction with inferred roles, accessible names,
   values and checked/expanded/disabled states.
@@ -227,7 +232,11 @@ limitations and licensing details. Product overview and usage live in
 - Proxy bypass lists (`no_proxy`) for HTTP CONNECT and SOCKS5/5H matching
   hostnames, domains, CIDR ranges and ports.
 - Stability/stress tests for tab limits, idle sweeps, repeated
-  navigate/render cycles, blocked private requests and profile recovery.
+  navigate/render cycles, API session churn, large generated documents,
+  blocked private requests and profile recovery, plus an opt-in long soak
+  (`soak_navigation_and_rendering_stays_bounded`).
+- Browser-wide benchmark (`examples/benchmark.rs`) reporting parse, render
+  and JS throughput together with process RSS; optionally runs a timed soak.
 
 Not implemented yet: CSS transforms/transitions/animations, floats, CSS Grid
 subgrid/named lines/auto-fit, flex column wrapping, SVG filters/advanced
@@ -239,7 +248,7 @@ See "Known limitations" below.
 
 ## Testing
 
-`cargo test` runs 319 tests covering tokenization, malformed HTML recovery, DOM
+`cargo test` runs 359 tests (2 ignored) covering tokenization, malformed HTML recovery, DOM
 mutation/selectors/serialization, entities/quirks/templates/foreign content,
 formatting reconstruction, CSS parsing/cascade/variables/media queries,
 `@import`/`@supports`/`calc()`, generated pseudo content, block/inline/flex/
@@ -282,12 +291,14 @@ HTML/DOM:
 JavaScript:
 
 - ES modules resolve static imports/re-exports and dynamic `import()` for
-  relative, absolute, `data:` and http(s) URLs; bare specifiers (packages,
-  import maps) and CORS/MIME enforcement are not implemented.
+  relative, absolute, `data:` and http(s) URLs. Bare specifiers resolve via
+  `<script type="importmap">` exact and trailing-slash mappings (load-time
+  only; no `scopes` or dynamic maps). CORS/MIME enforcement is not implemented.
 - `IntersectionObserver`/`ResizeObserver` are approximated from inline styles,
   attributes and window size because the JS runtime cannot see layout boxes.
-- Web Workers support external scripts, structured `postMessage`/`onmessage`
-  and termination, but no `importScripts`, module workers or nested workers.
+- Web Workers support external scripts, structured `postMessage`/`onmessage`,
+  `type: "module"` workers with static imports, and termination, but no
+  `importScripts`, worker `fetch`, or nested workers.
 - Page `WebSocket` supports text send/receive and close; binary/blob mode,
   subprotocols and backpressure are not implemented. Socket messages are
   delivered while timers or event-loop work are active.
@@ -395,8 +406,10 @@ Control plane:
   profiles, cookies, storage and session snapshots persist through the
   profile/storage layer, so a restart drops live tabs but can restore saved
   snapshots. SSRF blocking is opt-in, resolves hostnames, rejects any private
-  resolved address and re-checks each redirect hop; a residual rebinding window
-  remains and proxy-side resolution cannot be pinned.
+  resolved address and re-checks each redirect hop, then dials that pinned
+  address for direct connections and proxy tunnels (CONNECT targets the IP;
+  SOCKS5H sends the IP). A malicious proxy can still ignore the tunnel target,
+  so sensitive hosts should stay off untrusted proxies.
 - JS `evaluate` is limited by script length and Boa loop-iteration limits, not
   a hard wall-clock kill switch.
 - WebDriver support is a subset: CSS selectors only (no XPath/link-text), no

@@ -11,9 +11,11 @@
 //! - relative: `./foo.js`, `../lib/foo.js`
 //! - absolute path: `/assets/foo.js`
 //! - absolute URLs: `http://`, `https://` and `data:` URLs
+//! - bare specifiers mapped by a `<script type="importmap">` entry, including
+//!   trailing-slash prefix mappings
 //!
-//! Bare specifiers (e.g. `lodash`) are rejected because no import map or
-//! package resolution is available. `file:` and other schemes are rejected.
+//! Unmapped bare specifiers are rejected. `file:` and other schemes are
+//! rejected.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,22 +30,96 @@ use boa_engine::module::{ModuleLoader, ModuleRequest, Referrer};
 use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsString, Module, Source};
 use url::Url;
 
+use crate::engine::dom::Document;
 use crate::networking::HttpClient;
 
 use super::{fetch, js_string_value, value_to_display};
+
+/// Bare specifier entries from the document's `<script type="importmap">`.
+#[derive(Default)]
+pub(crate) struct ImportMap {
+    imports: HashMap<String, Url>,
+    prefixes: Vec<(String, Url)>,
+}
+
+impl ImportMap {
+    /// Read the first import map in the document. Invalid JSON or a missing
+    /// `imports` object yields an empty map instead of an error.
+    pub(crate) fn from_document(document: &Document, base_url: &Url) -> Self {
+        for id in document.descendants(document.document_node()) {
+            if document.tag_name(id) != Some("script") {
+                continue;
+            }
+            let is_import_map = document
+                .get_attribute(id, "type")
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("importmap"));
+            if is_import_map {
+                return Self::parse(&document.text_content(id), base_url);
+            }
+        }
+        Self::default()
+    }
+
+    fn parse(json: &str, base_url: &Url) -> Self {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            return Self::default();
+        };
+        let Some(imports) = value.get("imports").and_then(|imports| imports.as_object()) else {
+            return Self::default();
+        };
+        let mut map = Self::default();
+        for (specifier, target) in imports {
+            let Some(target) = target.as_str() else {
+                continue;
+            };
+            let target = Url::parse(target).or_else(|_| base_url.join(target)).ok();
+            let Some(target) = target else {
+                continue;
+            };
+            if specifier.ends_with('/') {
+                map.prefixes.push((specifier.clone(), target));
+            } else {
+                map.imports.insert(specifier.clone(), target);
+            }
+        }
+        map.prefixes
+            .sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
+        map
+    }
+
+    fn resolve(&self, specifier: &str) -> Option<Url> {
+        if let Some(target) = self.imports.get(specifier) {
+            return Some(target.clone());
+        }
+        for (prefix, target) in &self.prefixes {
+            if let Some(remainder) = specifier.strip_prefix(prefix.as_str()) {
+                let mut spliced = target.as_str().to_owned();
+                spliced.push_str(remainder);
+                return Url::parse(&spliced).ok();
+            }
+        }
+        None
+    }
+}
 
 /// Resolves and caches modules for one JavaScript runtime.
 pub(crate) struct ModuleRegistry {
     base_url: Url,
     client: Option<Arc<HttpClient>>,
+    import_map: ImportMap,
     cache: RefCell<HashMap<String, Module>>,
 }
 
 impl ModuleRegistry {
-    pub(crate) fn new(base_url: Url, client: Option<Arc<HttpClient>>) -> Rc<Self> {
+    pub(crate) fn new(
+        base_url: Url,
+        client: Option<Arc<HttpClient>>,
+        import_map: ImportMap,
+    ) -> Rc<Self> {
         Rc::new(Self {
             base_url,
             client,
+            import_map,
             cache: RefCell::new(HashMap::new()),
         })
     }
@@ -56,12 +132,7 @@ impl ModuleRegistry {
             return Err(type_error("empty module specifier"));
         }
         if let Ok(url) = Url::parse(specifier) {
-            return match url.scheme() {
-                "http" | "https" | "data" => Ok(url),
-                scheme => Err(type_error(format!(
-                    "unsupported module specifier scheme `{scheme}`: `{specifier}`"
-                ))),
-            };
+            return supported_module_url(url, specifier);
         }
         let relative = specifier.starts_with('/')
             || specifier.starts_with("./")
@@ -69,9 +140,12 @@ impl ModuleRegistry {
             || specifier == "."
             || specifier == "..";
         if !relative {
-            return Err(type_error(format!(
-                "cannot resolve bare module specifier `{specifier}`"
-            )));
+            let mapped = self.import_map.resolve(specifier).ok_or_else(|| {
+                type_error(format!(
+                    "cannot resolve bare module specifier `{specifier}`"
+                ))
+            })?;
+            return supported_module_url(mapped, specifier);
         }
         let base = referrer
             .and_then(|path| Url::parse(&path.to_string_lossy()).ok())
@@ -93,21 +167,7 @@ impl ModuleRegistry {
 
     /// Read the source text for a module URL.
     fn fetch_source(&self, url: &Url) -> JsResult<String> {
-        match url.scheme() {
-            "data" => decode_data_url(url),
-            "http" | "https" => {
-                let Some(client) = self.client.clone() else {
-                    return Err(type_error(format!(
-                        "cannot load module `{url}`: network access is unavailable"
-                    )));
-                };
-                fetch::fetch_text_sync(url.clone(), Some(client))
-                    .map_err(|error| type_error(format!("failed to load module `{url}`: {error}")))
-            }
-            scheme => Err(type_error(format!(
-                "unsupported module scheme `{scheme}` for `{url}`"
-            ))),
-        }
+        fetch_module_source(url, self.client.clone())
     }
 
     /// Load a module (or return the cached instance for its resolved URL).
@@ -187,6 +247,27 @@ pub(crate) fn evaluate_external_module(
     let Some(registry) = context.downcast_module_loader::<ModuleRegistry>() else {
         return evaluate_standalone(code, context);
     };
+    evaluate_with_source(&registry, url, code, context)
+}
+
+/// Fetch and evaluate a module by its resolved URL (used by module workers).
+pub(crate) fn evaluate_module_url(url: &Url, context: &mut Context) -> Option<String> {
+    let Some(registry) = context.downcast_module_loader::<ModuleRegistry>() else {
+        return Some("module loader is not available".to_owned());
+    };
+    let code = match registry.fetch_source(url) {
+        Ok(code) => code,
+        Err(error) => return Some(error.to_string()),
+    };
+    evaluate_with_source(&registry, url, &code, context)
+}
+
+fn evaluate_with_source(
+    registry: &ModuleRegistry,
+    url: &Url,
+    code: &str,
+    context: &mut Context,
+) -> Option<String> {
     // Cache before evaluating so that cycles and later imports reuse the
     // instance instead of parsing the module again.
     match registry.parse(url, code, context) {
@@ -222,6 +303,34 @@ fn evaluate_module(module: &Module, context: &mut Context) -> Option<String> {
 
 fn type_error(message: impl Into<String>) -> JsError {
     JsNativeError::typ().with_message(message.into()).into()
+}
+
+fn supported_module_url(url: Url, specifier: &str) -> JsResult<Url> {
+    match url.scheme() {
+        "http" | "https" | "data" => Ok(url),
+        scheme => Err(type_error(format!(
+            "unsupported module specifier scheme `{scheme}`: `{specifier}`"
+        ))),
+    }
+}
+
+/// Fetch module source for a supported URL scheme.
+pub(crate) fn fetch_module_source(url: &Url, client: Option<Arc<HttpClient>>) -> JsResult<String> {
+    match url.scheme() {
+        "data" => decode_data_url(url),
+        "http" | "https" => {
+            let Some(client) = client else {
+                return Err(type_error(format!(
+                    "cannot load module `{url}`: network access is unavailable"
+                )));
+            };
+            fetch::fetch_text_sync(url.clone(), Some(client))
+                .map_err(|error| type_error(format!("failed to load module `{url}`: {error}")))
+        }
+        scheme => Err(type_error(format!(
+            "unsupported module scheme `{scheme}` for `{url}`"
+        ))),
+    }
 }
 
 /// Decode a `data:` URL module body, honoring the `;base64` marker and

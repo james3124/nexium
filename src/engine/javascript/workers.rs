@@ -8,7 +8,7 @@ use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, NativeFunction}
 use serde_json::Value;
 use url::Url;
 
-use super::{host_error, indexeddb, js_string_value, string_arg, with_state};
+use super::{host_error, indexeddb, js_string_value, modules, string_arg, with_state};
 use crate::networking::parse_url;
 
 const WORKER_ID_KEY: &str = "__nexium_worker_id";
@@ -75,6 +75,12 @@ fn js_worker_construct(
     };
     let url =
         resolve_worker_url(&input).ok_or_else(|| host_error(format!("Invalid URL: {input}")))?;
+    let is_module = args
+        .get(1)
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(JsString::from("type"), context).ok())
+        .and_then(|value| value.to_string(context).ok())
+        .is_some_and(|value| value.to_std_string_escaped() == "module");
     let client = with_state(|state| state.client.clone()).flatten();
     let id = with_state(|state| {
         let id = state.worker_next_id;
@@ -89,7 +95,7 @@ fn js_worker_construct(
     let worker_url = url.clone();
     std::thread::Builder::new()
         .name("nexium-worker".to_owned())
-        .spawn(move || run_worker(id, worker_url, client, receiver, event_sender))
+        .spawn(move || run_worker(id, worker_url, client, is_module, receiver, event_sender))
         .map_err(|error| host_error(format!("failed to start worker: {error}")))?;
     with_state(|state| {
         state.workers.insert(id, WorkerHandle { sender });
@@ -111,19 +117,24 @@ fn run_worker(
     id: u64,
     url: Url,
     client: Option<std::sync::Arc<crate::networking::HttpClient>>,
+    is_module: bool,
     receiver: mpsc::Receiver<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
 ) {
     WORKER_ID.with(|slot| *slot.borrow_mut() = id);
     WORKER_OUTBOX.with(|slot| *slot.borrow_mut() = Some(events.clone()));
-    let code = match super::fetch::fetch_text_sync(url, client) {
-        Ok(code) => code,
-        Err(error) => {
-            let _ = events.send(WorkerEvent::Error(id, error));
-            return;
-        }
+    let mut context = if is_module {
+        Context::builder()
+            .module_loader(modules::ModuleRegistry::new(
+                url.clone(),
+                client.clone(),
+                modules::ImportMap::default(),
+            ))
+            .build()
+            .unwrap_or_default()
+    } else {
+        Context::default()
     };
-    let mut context = Context::default();
     context
         .runtime_limits_mut()
         .set_loop_iteration_limit(10_000_000);
@@ -131,9 +142,23 @@ fn run_worker(
         let _ = events.send(WorkerEvent::Error(id, error.to_string()));
         return;
     }
-    if let Err(error) = context.eval(boa_engine::Source::from_bytes(&code)) {
-        let _ = events.send(WorkerEvent::Error(id, error.to_string()));
-        return;
+    if is_module {
+        if let Some(error) = modules::evaluate_module_url(&url, &mut context) {
+            let _ = events.send(WorkerEvent::Error(id, error));
+            return;
+        }
+    } else {
+        let code = match super::fetch::fetch_text_sync(url, client) {
+            Ok(code) => code,
+            Err(error) => {
+                let _ = events.send(WorkerEvent::Error(id, error));
+                return;
+            }
+        };
+        if let Err(error) = context.eval(boa_engine::Source::from_bytes(&code)) {
+            let _ = events.send(WorkerEvent::Error(id, error.to_string()));
+            return;
+        }
     }
     let _ = context.run_jobs();
     while let Ok(command) = receiver.recv() {

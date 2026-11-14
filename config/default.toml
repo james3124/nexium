@@ -1,7 +1,7 @@
 # NexiumX default configuration
 
 # User-Agent sent by the networking engine. Empty means the built-in default.
-user_agent = "NexiumX/0.8.3 (independent Rust headless browser engine)"
+user_agent = "NexiumX/0.8.4 (independent Rust headless browser engine)"
 
 # Per-request timeout in milliseconds.
 timeout_ms = 30000

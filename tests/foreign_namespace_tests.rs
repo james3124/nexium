@@ -236,3 +236,128 @@ fn namespace_aware_mutation_helpers() {
         "xmlns"
     );
 }
+
+#[test]
+fn mathml_text_integration_points_parse_children_as_html() {
+    let doc = parse_html("<math><mi><b>x</b></mi></math>");
+    let mi = doc.select("mi").unwrap().expect("mi");
+    let bold = doc.select("b").unwrap().expect("bold");
+    assert_eq!(doc.element(mi).unwrap().namespace, Namespace::MathMl);
+    assert_eq!(doc.element(bold).unwrap().namespace, Namespace::Html);
+    assert_eq!(doc.parent(bold), Some(mi));
+    assert_eq!(doc.text_content(mi), "x");
+
+    // Every MathML text integration point uses the HTML rules for children.
+    for parent in ["mi", "mo", "mn", "ms", "mtext"] {
+        let source = format!("<math><{parent}><span>hi</span></{parent}></math>");
+        let doc = parse_html(&source);
+        let wrapper = doc
+            .select(parent)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{parent}"));
+        let span = doc.select("span").unwrap().expect("span");
+        assert_eq!(doc.element(span).unwrap().namespace, Namespace::Html);
+        assert_eq!(doc.parent(span), Some(wrapper));
+        assert_eq!(
+            doc.serialize(),
+            format!("<html><head></head><body>{source}</body></html>")
+        );
+    }
+}
+
+#[test]
+fn mglyph_stays_mathml_inside_a_text_integration_point() {
+    let doc = parse_html("<math><mi><mglyph src=x></mglyph></mi></math>");
+    let mi = doc.select("mi").unwrap().expect("mi");
+    let glyph = doc.select("mglyph").unwrap().expect("mglyph");
+    assert_eq!(doc.element(glyph).unwrap().namespace, Namespace::MathMl);
+    assert_eq!(doc.parent(glyph), Some(mi));
+    assert_eq!(doc.outer_html(mi), "<mi><mglyph src=\"x\"></mglyph></mi>");
+}
+
+#[test]
+fn annotation_xml_with_html_encoding_hosts_html_content() {
+    for encoding in ["text/html", "application/xhtml+xml", "TEXT/HTML"] {
+        let source = format!(
+            r#"<math><annotation-xml encoding="{encoding}"><div>x</div></annotation-xml></math>"#
+        );
+        let doc = parse_html(&source);
+        let annotation = doc
+            .select("annotation-xml")
+            .unwrap()
+            .expect("annotation-xml");
+        let div = doc.select("div").unwrap().expect("div");
+        assert_eq!(
+            doc.element(annotation).unwrap().namespace,
+            Namespace::MathMl
+        );
+        assert_eq!(doc.element(div).unwrap().namespace, Namespace::Html);
+        assert_eq!(doc.parent(div), Some(annotation));
+        assert_eq!(
+            doc.serialize(),
+            format!("<html><head></head><body>{source}</body></html>")
+        );
+    }
+
+    // Without an HTML encoding the element is not an integration point, so the
+    // HTML breakout tag closes the whole MathML subtree instead.
+    let doc = parse_html(
+        r#"<math><annotation-xml encoding="text/plain"><div>x</div></annotation-xml></math>"#,
+    );
+    let div = doc.select("div").unwrap().expect("div");
+    assert_eq!(doc.element(div).unwrap().namespace, Namespace::Html);
+    assert_eq!(doc.parent(div), doc.select("body").unwrap());
+}
+
+#[test]
+fn svg_html_integration_points_host_html_content() {
+    let source = "<svg><foreignObject><div>x</div></foreignObject><desc><p>y</p></desc></svg>";
+    let doc = parse_html(source);
+    let svg = doc.select("svg").unwrap().expect("svg");
+    assert_eq!(doc.element(svg).unwrap().namespace, Namespace::Svg);
+    for (child, parent) in [("div", "foreignObject"), ("p", "desc")] {
+        let child_id = doc
+            .select(child)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{child}"));
+        let parent_id = doc
+            .select(parent)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{parent}"));
+        assert_eq!(doc.element(child_id).unwrap().namespace, Namespace::Html);
+        assert_eq!(doc.element(parent_id).unwrap().namespace, Namespace::Svg);
+        assert_eq!(doc.parent(child_id), Some(parent_id));
+    }
+    assert_eq!(
+        doc.serialize(),
+        format!("<html><head></head><body>{source}</body></html>")
+    );
+    let reparsed = parse_html(&doc.serialize());
+    assert_eq!(reparsed.serialize(), doc.serialize());
+}
+
+#[test]
+fn html_breakout_tags_close_foreign_content() {
+    let doc = parse_html("<svg><g><div>x</div></g></svg>");
+    let div = doc.select("div").unwrap().expect("div");
+    assert_eq!(doc.element(div).unwrap().namespace, Namespace::Html);
+    assert_eq!(doc.parent(div), doc.select("body").unwrap());
+    assert!(doc.select("svg div").unwrap().is_none());
+}
+
+#[test]
+fn font_with_breakout_attributes_leaves_foreign_content() {
+    for attributes in ["color=red", "face=serif", "size=2"] {
+        let source = format!("<svg><g><font {attributes}>x</font></g></svg>");
+        let doc = parse_html(&source);
+        let font = doc.select("font").unwrap().expect("font");
+        assert_eq!(doc.element(font).unwrap().namespace, Namespace::Html);
+        assert_eq!(doc.parent(font), doc.select("body").unwrap());
+    }
+
+    // A font element without those attributes is ordinary SVG content.
+    let doc = parse_html("<svg><g><font>x</font></g></svg>");
+    let font = doc.select("font").unwrap().expect("font");
+    assert_eq!(doc.element(font).unwrap().namespace, Namespace::Svg);
+    assert_eq!(doc.parent(font), doc.select("g").unwrap());
+}

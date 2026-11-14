@@ -22,6 +22,7 @@ use super::service::{
 
 const AGENT: &str = "webdriver";
 
+#[allow(clippy::result_large_err)]
 fn auth(service: &ApiService, headers: &HeaderMap) -> Result<AuthContext, Response> {
     let token = headers
         .get(AUTHORIZATION)
@@ -222,6 +223,7 @@ pub(crate) async fn screenshot(
     )
 }
 
+#[allow(clippy::result_large_err)]
 fn require_css(using: &str) -> Result<(), Response> {
     if using == "css selector" {
         Ok(())
@@ -287,6 +289,7 @@ pub(crate) async fn find_elements(
     )
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_node(element: &str) -> Result<usize, Response> {
     element
         .strip_prefix('e')

@@ -422,6 +422,13 @@ impl<'a> Parser<'a> {
             .expect("append comment node");
     }
 
+    fn is_mathml_text_integration_point(&self, node: NodeId) -> bool {
+        self.doc.element(node).is_some_and(|element| {
+            element.namespace == Namespace::MathMl
+                && matches!(element.name.as_str(), "mi" | "mo" | "mn" | "ms" | "mtext")
+        })
+    }
+
     fn current_foreign_namespace(&self) -> Option<Namespace> {
         let element = self.doc.element(self.current())?;
         match element.namespace {
@@ -493,12 +500,94 @@ impl<'a> Parser<'a> {
             .unwrap_or(current)
     }
 
+    /// True when the current node is an HTML table container, i.e. the
+    /// insertion modes that need foster parenting.
+    fn in_table_context(&self) -> bool {
+        self.doc.element(self.current()).is_some_and(|element| {
+            element.namespace == Namespace::Html
+                && matches!(
+                    element.name.as_str(),
+                    "table" | "tbody" | "tfoot" | "thead" | "tr"
+                )
+        })
+    }
+
+    fn last_open_table(&self) -> Option<NodeId> {
+        self.stack.iter().rev().copied().find(|&id| {
+            self.doc
+                .element(id)
+                .is_some_and(|el| el.namespace == Namespace::Html && el.name == "table")
+        })
+    }
+
+    /// Insert `node` immediately before the last open table, per the
+    /// "appropriate place for inserting a node" foster-parenting rules.
+    fn foster_append(&mut self, node: NodeId) {
+        let Some(table) = self.last_open_table() else {
+            let parent = self.insertion_parent();
+            let _ = self.doc.append_child(parent, node);
+            return;
+        };
+        let Some(parent) = self.doc.parent(table) else {
+            let _ = self.doc.append_child(table, node);
+            return;
+        };
+        if self.doc.insert_before(parent, node, Some(table)).is_err() {
+            let _ = self.doc.append_child(parent, node);
+        }
+    }
+
+    fn foster_text(&mut self, text: &str) {
+        let Some(table) = self.last_open_table() else {
+            self.insert_text_at(self.insertion_parent(), None, text);
+            return;
+        };
+        let Some(parent) = self.doc.parent(table) else {
+            self.insert_text_at(table, None, text);
+            return;
+        };
+        self.insert_text_at(parent, Some(table), text);
+    }
+
+    /// Append `text` before `before` (or at the end when `None`), merging into
+    /// an adjacent text node like the "insert a character" steps do.
+    fn insert_text_at(&mut self, parent: NodeId, before: Option<NodeId>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let previous = match before {
+            Some(before) => self
+                .doc
+                .children(parent)
+                .iter()
+                .position(|&id| id == before)
+                .and_then(|index| index.checked_sub(1))
+                .map(|index| self.doc.children(parent)[index]),
+            None => self.doc.children(parent).last().copied(),
+        };
+        if let Some(previous) = previous
+            && let NodeData::Text(existing) = &mut self.doc.node_mut(previous).data
+        {
+            existing.push_str(text);
+            return;
+        }
+        let id = self.doc.create_text(text);
+        let _ = self.doc.insert_before(parent, id, before);
+    }
+
     fn insert_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        if self.current_foreign_namespace().is_none() {
+        let whitespace = text.chars().all(is_space);
+        if self.current_foreign_namespace().is_none() && !(self.in_table_context() && whitespace) {
             self.reconstruct_formatting();
+        }
+        // Only whitespace stays in a table; anything else is fostered out. If
+        // reconstruct_formatting() opened a wrapper the text belongs inside it.
+        if !whitespace && self.in_table_context() {
+            self.foster_text(text);
+            return;
         }
         let parent = self.insertion_parent();
         let strip_newline = {
@@ -534,7 +623,11 @@ impl<'a> Parser<'a> {
                 element.template_contents = Some(fragment);
             }
         }
-        self.doc.append_child(parent, id).expect("append element");
+        if self.in_table_context() && !is_table_structure_tag(name) {
+            self.foster_append(id);
+        } else {
+            self.doc.append_child(parent, id).expect("append element");
+        }
         id
     }
 
@@ -586,8 +679,12 @@ impl<'a> Parser<'a> {
             return;
         };
         let name = name.as_str();
+        let mathml_text_point = self.is_mathml_text_integration_point(self.current());
         if let Some(namespace) = self.current_foreign_namespace() {
-            if is_foreign_breakout(name) {
+            if mathml_text_point && !matches!(name, "mglyph" | "malignmark") {
+                // Fall through: inside a MathML text integration point HTML
+                // content is parsed with the HTML rules.
+            } else if is_foreign_breakout(name, attrs) {
                 self.exit_foreign_content();
             } else {
                 self.insert_foreign_element(token, namespace);
@@ -664,6 +761,7 @@ impl<'a> Parser<'a> {
                 self.insert_element_and_push(token);
             }
             "tr" => {
+                self.pop_through_any_bounded(&["caption"], &["table"]);
                 self.pop_through_any_bounded(&["td", "th"], &["table"]);
                 self.pop_through_any_bounded(&["tr"], &["table"]);
                 self.insert_element_and_push(token);
@@ -892,7 +990,11 @@ impl<'a> Parser<'a> {
             }
             let parent = self.insertion_parent();
             let new_node = self.doc.create_element_with_attributes(&name, attributes);
-            let _ = self.doc.append_child(parent, new_node);
+            if self.in_table_context() {
+                self.foster_append(new_node);
+            } else {
+                let _ = self.doc.append_child(parent, new_node);
+            }
             self.stack.push(new_node);
             if let ActiveFormatting::Element { node, .. } = &mut self.active_formatting[index] {
                 *node = new_node;
@@ -1266,7 +1368,12 @@ fn classify_quirks(name: &str, public_id: &str, system_id: &str) -> QuirksMode {
     QuirksMode::NoQuirks
 }
 
-fn is_foreign_breakout(name: &str) -> bool {
+fn is_foreign_breakout(name: &str, attrs: &[Attribute]) -> bool {
+    if name == "font" {
+        return attrs
+            .iter()
+            .any(|attribute| matches!(attribute.name.as_str(), "color" | "face" | "size"));
+    }
     matches!(
         name,
         "b" | "big"
@@ -1312,6 +1419,26 @@ fn is_foreign_breakout(name: &str) -> bool {
             | "u"
             | "ul"
             | "var"
+    )
+}
+
+fn is_table_structure_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "caption"
+            | "col"
+            | "colgroup"
+            | "tbody"
+            | "tfoot"
+            | "thead"
+            | "tr"
+            | "td"
+            | "th"
+            | "table"
+            | "template"
+            | "script"
+            | "style"
+            | "form"
     )
 }
 

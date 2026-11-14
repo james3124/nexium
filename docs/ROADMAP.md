@@ -146,8 +146,10 @@ render the updated DOM.
 
 - ES modules resolve static import/export/re-export and dynamic `import()`
   across relative/absolute/data/http(s) URLs with cached instances; bare
-  specifiers (packages, import maps), CORS/MIME enforcement and module workers
-  remain unimplemented.
+  specifiers resolve through `<script type="importmap">` exact and
+  trailing-slash mappings, and `type: "module"` workers execute their static
+  import graphs. Import-map `scopes`, dynamically added maps, CORS/MIME
+  enforcement and worker `fetch`/`importScripts` remain unimplemented.
 - IntersectionObserver/ResizeObserver exist but approximate geometry from
   inline styles/attributes/window size because the JS runtime cannot see
   layout boxes; `characterData` is detected by snapshot diffing.
@@ -318,6 +320,9 @@ graphics and scripted pages, with unsupported areas explicitly tracked.
       sanitized snapshot names.
 - [x] Stress/stability tests for tab limits, idle sweeping, repeated
       navigation/rendering, blocked private requests and recovery.
+- [x] Browser-wide benchmark (`examples/benchmark.rs`) for parse/layout/paint/JS
+      throughput and RSS, plus bounded session-churn/large-document tests and
+      an opt-in long soak (`soak_navigation_and_rendering_stays_bounded`).
 - [x] Documentation updated with limits, security controls and compatibility
       status.
 
@@ -326,11 +331,13 @@ limits, cleanup and recovery behavior.
 
 ### Phase 8 remaining gaps (tracked)
 
-- No WPT harness or browser-wide performance benchmark suite; stress tests are
-  targeted integration tests rather than long-running soak tests.
+- No Web Platform Tests corpus; performance coverage is the local
+  `benchmark` example plus targeted tests, and the long soak is opt-in
+  (`#[ignore]`).
 - SSRF protection resolves hostnames and rejects any private resolved address,
-  re-checking redirect hops; a residual DNS-rebinding window remains and
-  proxy-side resolution cannot be pinned.
+  re-checking redirect hops, then pins that address for direct connections and
+  proxy tunnels (HTTP CONNECT targets the IP, SOCKS5H sends the IP). A
+  malicious proxy can still ignore the tunnel target.
 - Rate limiting and token rotation/revocation are implemented; sandboxed
   process isolation is not.
 - Session snapshots recover tabs/history/storage, not live JS timers or
@@ -338,24 +345,27 @@ limits, cleanup and recovery behavior.
 
 ## Test status
 
-- 306 automated tests across HTML, DOM, selectors, entities/quirks/templates,
+- 359 automated tests across HTML, DOM, selectors, entities/quirks/templates,
+  foster parenting and foreign-content integration points,
   CSS (`calc`, `min`/`max`/`clamp`, `@namespace`, `@import`, `@supports`,
   media queries incl. range syntax), generated content, block/inline/flex/
   table layout (colspan, rowspan, border-collapse, captions), margin
   collapsing, percentage heights, backgrounds/radius/borders/z-index/list
   markers, JavaScript DOM/web APIs/events/timers/promises/fetch/ES modules
-  with imports/observers, rendering, networking (compression, cookies, cache,
-  proxy bypass, interception), configuration, decoding and page inspection —
-  plus profiles, persistence (cookies, local storage, IndexedDB with indexes/
-  cursors/key ranges/autoIncrement, disk cache), tabs/navigation, session
-  restore, hit testing, live click/typing dispatch, hover `:hover` styling,
-  trusted events, Tab focus traversal, link/form navigation, contenteditable,
-  scrolling, accessibility and DOM snapshots, REST auth/session isolation,
-  token rotation, rate limiting, audit log, MCP tool discovery/execution and
-  SSE transport, WebSocket commands/events, CSS Grid geometry, SVG/canvas
-  painting (gradients/patterns/text), page WebSockets, Web Workers, modern
-  browser APIs, and stability/security checks for tab limits, idle cleanup,
-  resolved-address SSRF blocking and crash recovery — all passing (1 ignored).
+  with import maps/module workers and observers, rendering, networking
+  (compression, cookies, cache, proxy bypass, interception), configuration,
+  decoding and page inspection — plus profiles, persistence (cookies, local
+  storage, IndexedDB with indexes/cursors/key ranges/autoIncrement, disk
+  cache), tabs/navigation, session restore, hit testing, live click/typing
+  dispatch, hover `:hover` styling, trusted events, Tab focus traversal,
+  link/form navigation, contenteditable, scrolling, accessibility and DOM
+  snapshots, REST auth/session isolation, token rotation, rate limiting,
+  audit log, MCP tool discovery/execution and SSE transport, WebSocket
+  commands/events, CSS Grid geometry, SVG/canvas painting
+  (gradients/patterns/text), page WebSockets, Web Workers, modern browser
+  APIs, and stability/security checks for tab limits, idle cleanup,
+  session churn, large documents, proxy-pinned SSRF blocking and crash
+  recovery — all passing (2 ignored).
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
 - Manual verification against `https://example.com` (fetch, DOM inspection and
   screenshot) and `https://news.ycombinator.com` (HTTPS, HTTP/2, real-world

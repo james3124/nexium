@@ -130,6 +130,42 @@ fn canvas_to_data_url_exports_png() {
 }
 
 #[test]
+fn adjacent_html_inner_text_and_scripts_collection() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="app"><p id="first">first</p></div><script>
+  const app = document.getElementById("app");
+  document.getElementById("first").insertAdjacentHTML("afterend", "<p id='second'>second</p>");
+  app.insertAdjacentHTML("afterbegin", "<p id='zero'>zero</p>");
+  app.insertAdjacentHTML("beforeend", "<p id='last'>last</p>");
+  document.body.insertAdjacentHTML("beforeend", "<p id='tail'>tail</p>");
+  const pre = document.createElement("span");
+  pre.id = "pre";
+  pre.textContent = "pre";
+  document.body.prepend(pre);
+  document.body.append("tail-text");
+  document.body.setAttribute("data-scripts", String(document.scripts.length));
+  document.body.setAttribute("data-inner", app.innerText);
+</script></body>"#,
+        )
+        .unwrap();
+    for id in ["second", "zero", "last", "tail", "pre"] {
+        assert!(page.select(&format!("#{id}")).unwrap().is_some(), "{id}");
+    }
+    let app = page.select("#app").unwrap().unwrap();
+    assert_eq!(page.document.text_content(app), "zerofirstsecondlast");
+    let body = page.select("body").unwrap().unwrap();
+    assert_eq!(page.document.get_attribute(body, "data-scripts"), Some("1"));
+    assert_eq!(
+        page.document.get_attribute(body, "data-inner"),
+        Some("zerofirstsecondlast")
+    );
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+}
+
+#[test]
 fn modern_browser_apis_work_in_scripts() {
     let browser = browser();
     let page = browser
@@ -531,5 +567,112 @@ async fn request_headers_and_abort_are_supported() {
     assert_eq!(page.document.text_content(out), "abc");
     let abort = page.select("#abort").unwrap().unwrap();
     assert_eq!(page.document.text_content(abort), "aborted");
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+}
+
+#[test]
+fn invalid_import_maps_are_ignored() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<script type="importmap">{not json</script>
+<script type="module">import "missing";</script>"#,
+        )
+        .unwrap();
+    assert!(
+        page.script_errors
+            .iter()
+            .any(|error| error.contains("bare module specifier `missing`")),
+        "{:?}",
+        page.script_errors
+    );
+}
+
+fn data_module(source: &str) -> String {
+    let mut url = String::from("data:text/javascript,");
+    for byte in source.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
+#[test]
+fn import_map_resolves_static_bare_specifiers() {
+    let browser = browser();
+    let helper = data_module("export const answer = 40;");
+    let prefix = data_module("export const value = 4");
+    let page = browser
+        .load_html(
+            "https://js.test/app/",
+            &format!(
+                r#"<p id="out"></p>
+<script type="importmap">{{"imports":{{"lib/answer":"{helper}","pkg/":"{prefix}"}}}}</script>
+<script type="module">
+  import {{ answer }} from "lib/answer";
+  import {{ value }} from "pkg/2";
+  document.getElementById("out").textContent = String(answer + 2) + ":" + String(value);
+</script>"#
+            ),
+        )
+        .unwrap();
+    let out = page.select("#out").unwrap().unwrap();
+    assert_eq!(page.document.text_content(out), "42:42");
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+}
+
+#[test]
+fn import_map_resolves_dynamic_imports() {
+    let browser = browser();
+    let helper = data_module("export const value = 21;");
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            &format!(
+                r#"<p id="out"></p>
+<script type="importmap">{{"imports":{{"dyn":"{helper}"}}}}</script>
+<script>
+  import("dyn").then(function (module) {{
+    document.getElementById("out").textContent = String(module.value * 2);
+  }});
+</script>"#
+            ),
+        )
+        .unwrap();
+    let out = page.select("#out").unwrap().unwrap();
+    assert_eq!(page.document.text_content(out), "42");
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+}
+
+#[test]
+fn module_workers_import_helpers_and_post_results() {
+    let browser = browser();
+    let helper = data_module("export const double = (value) => value * 2;");
+    let worker = data_module(&format!(
+        "import {{ double }} from {helper:?}; self.onmessage = (event) => postMessage({{ value: double(event.data.value) }});"
+    ));
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            &format!(
+                r#"<body data-worker=""><script>
+  var worker = new Worker('{worker}', {{ type: 'module' }});
+  worker.onmessage = function (event) {{
+    document.body.setAttribute('data-worker', String(event.data.value));
+    clearInterval(timer);
+  }};
+  worker.postMessage({{ value: 21 }});
+  var tries = 0;
+  var timer = setInterval(function () {{ if (++tries > 200) clearInterval(timer); }}, 10);
+</script></body>"#
+            ),
+        )
+        .unwrap();
+    let body = page.select("body").unwrap().unwrap();
+    assert_eq!(page.document.get_attribute(body, "data-worker"), Some("42"));
     assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
 }

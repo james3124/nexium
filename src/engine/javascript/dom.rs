@@ -89,6 +89,8 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
         };
 
     let text_content = accessor(get_text_content, Some(set_text_content));
+    let inner_text = accessor(get_inner_text, Some(set_inner_text));
+    let scripts = accessor(get_scripts, None);
     let inner_html = accessor(get_inner_html, Some(set_inner_html));
     let outer_html = accessor(get_outer_html, None);
     let id = accessor(get_id, Some(set_id));
@@ -126,6 +128,18 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             JsString::from("textContent"),
             Some(text_content.0),
             text_content.1,
+            Attribute::all(),
+        )
+        .accessor(
+            JsString::from("innerText"),
+            Some(inner_text.0),
+            inner_text.1,
+            Attribute::all(),
+        )
+        .accessor(
+            JsString::from("scripts"),
+            Some(scripts.0),
+            scripts.1,
             Attribute::all(),
         )
         .accessor(
@@ -270,7 +284,7 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             Attribute::all(),
         );
 
-    let methods: [(&str, NativeFunction, usize); 25] = [
+    let methods: [(&str, NativeFunction, usize); 28] = [
         (
             "getAttribute",
             NativeFunction::from_fn_ptr(js_get_attribute),
@@ -301,6 +315,13 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             NativeFunction::from_fn_ptr(js_insert_before),
             2,
         ),
+        (
+            "insertAdjacentHTML",
+            NativeFunction::from_fn_ptr(js_insert_adjacent_html),
+            2,
+        ),
+        ("prepend", NativeFunction::from_fn_ptr(js_prepend), 0),
+        ("append", NativeFunction::from_fn_ptr(js_append), 0),
         (
             "removeChild",
             NativeFunction::from_fn_ptr(js_remove_child),
@@ -463,6 +484,32 @@ fn get_text_content(this: &JsValue, _args: &[JsValue], context: &mut Context) ->
     Ok(js_string_value(&text))
 }
 
+fn get_inner_text(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    get_text_content(this, _args, context)
+}
+
+fn set_inner_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    set_text_content(this, args, context)
+}
+
+fn get_scripts(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let root = node_of(this, context)?;
+    let ids: Vec<NodeId> = {
+        let document = document()?;
+        let document = document.borrow();
+        document
+            .descendants(root)
+            .into_iter()
+            .filter(|&id| document.tag_name(id) == Some("script"))
+            .collect()
+    };
+    let array = JsArray::new(context)?;
+    for id in ids {
+        array.push(wrap_node(id, context)?, context)?;
+    }
+    Ok(JsValue::from(array))
+}
+
 fn set_text_content(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node = node_of(this, context)?;
     let text = string_arg(args, 0, context).unwrap_or_default();
@@ -513,6 +560,81 @@ fn set_inner_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     }
     let added = document.borrow().children(parent).to_vec();
     observers::record_child_list(parent, &added, &removed);
+    Ok(JsValue::undefined())
+}
+
+fn js_insert_adjacent_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let position = string_arg(args, 0, context)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let html = string_arg(args, 1, context).unwrap_or_default();
+    let document = document()?;
+    let parsed = parse_html(&html);
+    let body = parsed
+        .descendants(parsed.document_node())
+        .into_iter()
+        .find(|&id| parsed.tag_name(id) == Some("body"));
+
+    let content = |node: NodeId| {
+        document
+            .borrow()
+            .element(node)
+            .and_then(|element| element.template_contents)
+            .unwrap_or(node)
+    };
+    let (parent, reference) = match position.as_str() {
+        "beforebegin" => {
+            let parent = document.borrow().parent(node);
+            (parent, parent.map(|_| node))
+        }
+        "afterbegin" => {
+            let target = content(node);
+            let first = document.borrow().children(target).first().copied();
+            (Some(target), first)
+        }
+        "beforeend" => (Some(content(node)), None),
+        "afterend" => {
+            let parent = document.borrow().parent(node);
+            let reference = parent.and_then(|parent| {
+                let children = document.borrow().children(parent).to_vec();
+                children
+                    .iter()
+                    .position(|&child| child == node)
+                    .and_then(|index| children.get(index + 1).copied())
+            });
+            (parent, reference)
+        }
+        _ => {
+            return Err(host_error(format!(
+                "invalid insertAdjacentHTML position: {position}"
+            )));
+        }
+    };
+    let Some(parent) = parent else {
+        return Ok(JsValue::undefined());
+    };
+
+    let mut added = Vec::new();
+    if let Some(body) = body {
+        for child in parsed.children(body).to_vec() {
+            let imported = {
+                let mut target = document.borrow_mut();
+                import_subtree(&mut target, &parsed, child)
+            };
+            if let Some(imported) = imported {
+                let _ = document
+                    .borrow_mut()
+                    .insert_before(parent, imported, reference);
+                added.push(imported);
+            }
+        }
+    }
+    observers::record_child_list(parent, &added, &[]);
     Ok(JsValue::undefined())
 }
 
@@ -788,6 +910,55 @@ fn js_insert_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     observers::record_child_list(parent, &[child], &[]);
     maybe_execute_script(child, context);
     Ok(args.first().cloned().unwrap_or(JsValue::undefined()))
+}
+
+fn node_ids_from_args(args: &[JsValue], context: &mut Context) -> JsResult<Vec<NodeId>> {
+    let document = document()?;
+    let mut ids = Vec::new();
+    for arg in args {
+        if let Some(object) = arg.as_object()
+            && let Some(id) = node_id_from_object(&object, context)
+        {
+            ids.push(id);
+            continue;
+        }
+        let text = value_to_display(arg, context);
+        ids.push(document.borrow_mut().create_text(&text));
+    }
+    Ok(ids)
+}
+
+fn js_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent = node_of(this, context)?;
+    let ids = node_ids_from_args(args, context)?;
+    let reference = document()?.borrow().children(parent).first().copied();
+    let mut added = Vec::new();
+    for id in ids {
+        if document()?
+            .borrow_mut()
+            .insert_before(parent, id, reference)
+            .is_ok()
+        {
+            added.push(id);
+            maybe_execute_script(id, context);
+        }
+    }
+    observers::record_child_list(parent, &added, &[]);
+    Ok(JsValue::undefined())
+}
+
+fn js_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent = node_of(this, context)?;
+    let ids = node_ids_from_args(args, context)?;
+    let mut added = Vec::new();
+    for id in ids {
+        if document()?.borrow_mut().append_child(parent, id).is_ok() {
+            added.push(id);
+            maybe_execute_script(id, context);
+        }
+    }
+    observers::record_child_list(parent, &added, &[]);
+    Ok(JsValue::undefined())
 }
 
 fn js_remove_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

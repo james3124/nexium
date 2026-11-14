@@ -277,3 +277,88 @@ fn formatting_element_out_of_scope_across_table_boundary_is_ignored() {
         "text after the ignored end tag stays outside the table"
     );
 }
+
+#[test]
+fn table_text_is_foster_parented_before_the_table() {
+    let doc = parse_html("<table>text<tr><td>x</td></tr>text</table>");
+    let body = doc.select("body").unwrap().unwrap();
+    let children = doc.children(body);
+    assert_eq!(children.len(), 2, "body: {}", doc.outer_html(body));
+    assert_eq!(doc.tag_name(children[0]), None);
+    // The trailing run is fostered next to the leading one and merges.
+    assert_eq!(doc.text_content(children[0]), "texttext");
+    assert_eq!(doc.tag_name(children[1]), Some("table"));
+
+    let table = children[1];
+    let table_children = doc.children(table);
+    assert_eq!(table_children.len(), 1);
+    assert_eq!(doc.tag_name(table_children[0]), Some("tr"));
+    assert_eq!(doc.text_content(doc.select("td").unwrap().unwrap()), "x");
+}
+
+#[test]
+fn table_elements_are_foster_parented_before_the_table() {
+    let doc = parse_html("<table><div>y</div><tr><td>x</td></tr></table>");
+    let body = doc.select("body").unwrap().unwrap();
+    let children = doc.children(body);
+    assert_eq!(children.len(), 2, "body: {}", doc.outer_html(body));
+    assert_eq!(doc.tag_name(children[0]), Some("div"));
+    assert_eq!(doc.text_content(children[0]), "y");
+    assert_eq!(doc.tag_name(children[1]), Some("table"));
+    // The fostered div keeps its own subtree but stays out of the table.
+    assert!(doc.select("table div").unwrap().is_none());
+    assert_eq!(doc.select("div").unwrap().unwrap(), children[0]);
+}
+
+#[test]
+fn whitespace_only_text_stays_inside_the_table() {
+    let doc = parse_html("<table>\n  <tr><td>x</td></tr></table>");
+    let table = doc.select("table").unwrap().unwrap();
+    let first = doc.children(table)[0];
+    assert_eq!(doc.tag_name(first), None);
+    assert_eq!(doc.text_content(first), "\n  ");
+    // Nothing was fostered out to the body.
+    let body = doc.select("body").unwrap().unwrap();
+    assert_eq!(doc.children(body).len(), 1);
+}
+
+#[test]
+fn foster_parenting_targets_the_innermost_table() {
+    let doc = parse_html("<table><tr><td>a<table>b<tr><td>c</td></tr></table></td></tr></table>");
+    let outer_cell = doc.select("td").unwrap().unwrap();
+    let children = doc.children(outer_cell);
+    assert_eq!(children.len(), 2, "cell: {}", doc.outer_html(outer_cell));
+    assert_eq!(doc.tag_name(children[0]), None);
+    assert_eq!(doc.text_content(children[0]), "ab");
+    assert_eq!(doc.tag_name(children[1]), Some("table"));
+}
+
+#[test]
+fn a_row_closes_an_open_caption_back_to_table_context() {
+    let doc = parse_html("<table><caption>c<tr><td>x</td></tr></table>");
+    let caption = doc.select("caption").unwrap().unwrap();
+    assert_eq!(doc.text_content(caption), "c");
+    assert!(doc.select("caption tr").unwrap().is_none());
+    let table = doc.select("table").unwrap().unwrap();
+    let table_children = doc.children(table);
+    assert_eq!(doc.tag_name(table_children[0]), Some("caption"));
+    assert_eq!(doc.tag_name(table_children[1]), Some("tr"));
+}
+
+#[test]
+fn template_rows_inside_a_table_stay_in_the_detached_fragment() {
+    let doc = parse_html("<table><template><tr><td>x</td></tr></template></table>");
+    let table = doc.select("table").unwrap().unwrap();
+    let template = doc.select("template").unwrap().unwrap();
+    assert_eq!(doc.tag_name(doc.children(table)[0]), Some("template"));
+    // The template element itself has no DOM children; its rows live in the
+    // detached DocumentFragment, so selectors from the document cannot see them.
+    assert!(doc.children(template).is_empty());
+    assert!(doc.select("table tr").unwrap().is_none());
+
+    let content = doc.template_content(template).expect("template content");
+    let fragment_children = doc.children(content);
+    assert_eq!(fragment_children.len(), 1);
+    assert_eq!(doc.tag_name(fragment_children[0]), Some("tr"));
+    assert_eq!(doc.text_content(fragment_children[0]), "x");
+}

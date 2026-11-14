@@ -598,8 +598,7 @@ impl HttpClient {
 
     /// Resolve the destination and reject it when any address is private,
     /// loopback, link-local, unspecified or multicast. Resolved addresses are
-    /// pinned for the direct connector. See [`super::ssrf`] for the DNS
-    /// rebinding caveat.
+    /// pinned for direct connections and proxy tunnels. See [`super::ssrf`].
     async fn enforce_ssrf(&self, url: &Url) -> Result<()> {
         if !self.block_private_networks {
             return Ok(());
@@ -735,18 +734,18 @@ impl Service<hyper::Uri> for Connector {
                 },
                 None => static_proxy.clone(),
             };
-            if let Some(proxy) = proxy
-                && !bypass.matches(&host, Some(port))
-            {
-                return proxy_tunnel(&mut direct, &proxy, &host, port).await;
-            }
-
-            // Direct connection: use the addresses validated by the SSRF
-            // policy so DNS cannot change between check and connect.
             let addresses = pinned
                 .lock()
                 .ok()
                 .and_then(|map| map.get(&pin_key(&host, port)).cloned());
+            if let Some(proxy) = proxy
+                && !bypass.matches(&host, Some(port))
+            {
+                return proxy_tunnel(&mut direct, &proxy, &host, port, addresses.as_deref()).await;
+            }
+
+            // Direct connection: use the addresses validated by the SSRF
+            // policy so DNS cannot change between check and connect.
             if let Some(addresses) = addresses {
                 let mut last_error = None;
                 for address in addresses {
@@ -822,17 +821,25 @@ fn authority(host: &str, port: u16) -> String {
 }
 
 /// Establish a tunnel to `host:port` through the configured proxy.
+///
+/// `pinned` carries the SSRF-validated addresses. When present, the tunnel
+/// targets the pinned IP so proxy-side DNS cannot rebind the destination.
 async fn proxy_tunnel(
     connector: &mut HttpConnector,
     proxy: &ProxyConfig,
     host: &str,
     port: u16,
+    pinned: Option<&[SocketAddr]>,
 ) -> std::result::Result<TokioIo<TcpStream>, BoxError> {
     let mut tcp = dial_proxy(connector, proxy).await?;
+    let pinned_ip = pinned
+        .and_then(|addresses| addresses.first())
+        .map(|address| address.ip().to_string());
 
     match proxy.kind {
         ProxyKind::HttpConnect => {
-            let authority = authority(host, port);
+            let target = pinned_ip.as_deref().unwrap_or(host);
+            let authority = authority(target, port);
             let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
             if let Some(authorization) = &proxy.authorization
                 && let Ok(value) = authorization.to_str()
@@ -870,7 +877,14 @@ async fn proxy_tunnel(
             }
         }
         ProxyKind::Socks5 { remote_dns } => {
-            socks5_handshake(&mut tcp, proxy, host, port, remote_dns).await?;
+            // A pinned address only exists when SSRF blocking is enabled.
+            // Send that IP instead of the hostname so the proxy cannot
+            // resolve it to a different (e.g. private) address.
+            let (dial_host, remote_dns) = match pinned_ip {
+                Some(ip) => (ip, false),
+                None => (host.to_owned(), remote_dns),
+            };
+            socks5_handshake(&mut tcp, proxy, &dial_host, port, remote_dns).await?;
         }
     }
     Ok(TokioIo::new(tcp))

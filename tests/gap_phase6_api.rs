@@ -552,6 +552,34 @@ async fn mcp_sse_endpoint_streams_endpoint_and_responses() {
 }
 
 #[tokio::test]
+async fn memory_endpoints_report_process_usage() {
+    let (addr, _service, data_dir) = spawn_api(|_| {}).await;
+
+    let memory = http(addr, "GET", "/memory", None, None, None).await;
+    assert_eq!(memory.status, 200);
+    assert!(
+        memory.body["data"]["process"]["rss_kb"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{}",
+        memory.body
+    );
+
+    let health = http(addr, "GET", "/health", None, None, None).await;
+    assert!(
+        health.body["data"]["memory"]["process"]["threads"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{}",
+        health.body
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn mcp_streamable_http_get_stream_delete_and_version_echo() {
     let (addr, _service, data_dir) = spawn_api(|_| {}).await;
 

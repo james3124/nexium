@@ -405,12 +405,12 @@ fn parse_condition(expression: &str) -> Option<Condition> {
     if expression.starts_with("isPlainHostName(") {
         return Some(Condition::IsPlainHostName);
     }
-    if let Some((left, right)) = expression.split_once("==") {
-        if left.trim().eq_ignore_ascii_case("host") {
-            return Some(Condition::HostEquals(
-                right.trim().trim_matches('"').trim_matches('\'').to_owned(),
-            ));
-        }
+    if let Some((left, right)) = expression.split_once("==")
+        && left.trim().eq_ignore_ascii_case("host")
+    {
+        return Some(Condition::HostEquals(
+            right.trim().trim_matches('"').trim_matches('\'').to_owned(),
+        ));
     }
     if expression == "true" {
         return Some(Condition::Any);
@@ -418,7 +418,7 @@ fn parse_condition(expression: &str) -> Option<Condition> {
     None
 }
 
-fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<Vec<String>> {
+fn split_top_level(expression: &str, operator: &str) -> Option<Vec<String>> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut quoted = false;

@@ -758,7 +758,9 @@ fn initialize_runtime(
     options: &ScriptOptions,
 ) -> (Context, Rc<RefCell<Document>>, HostResult) {
     let document_rc = Rc::new(RefCell::new(document));
-    let module_registry = modules::ModuleRegistry::new(base_url.clone(), client.clone());
+    let import_map = modules::ImportMap::from_document(&document_rc.borrow(), &base_url);
+    let module_registry =
+        modules::ModuleRegistry::new(base_url.clone(), client.clone(), import_map);
     let state = JsState {
         document: Rc::clone(&document_rc),
         base_url: base_url.clone(),

@@ -62,15 +62,15 @@ Or download a release archive directly:
 
 | Platform | Archive |
 |---|---|
-| Linux x86_64 | `nexium-v0.8.3-linux-x64.tar.gz` |
-| Linux arm64 | `nexium-v0.8.3-linux-arm64.tar.gz` |
-| macOS arm64 | `nexium-v0.8.3-darwin-arm64.tar.gz` |
-| macOS x86_64 | `nexium-v0.8.3-darwin-x64.tar.gz` |
-| Windows x86_64 | `nexium-v0.8.3-win32-x64.tar.gz` |
+| Linux x86_64 | `nexium-v0.8.4-linux-x64.tar.gz` |
+| Linux arm64 | `nexium-v0.8.4-linux-arm64.tar.gz` |
+| macOS arm64 | `nexium-v0.8.4-darwin-arm64.tar.gz` |
+| macOS x86_64 | `nexium-v0.8.4-darwin-x64.tar.gz` |
+| Windows x86_64 | `nexium-v0.8.4-win32-x64.tar.gz` |
 
 ```bash
 curl -L -o nexium.tar.gz \
-  https://github.com/james3124/nexium/releases/download/v0.8.3/nexium-v0.8.3-linux-x64.tar.gz
+  https://github.com/james3124/nexium/releases/download/v0.8.4/nexium-v0.8.4-linux-x64.tar.gz
 tar -xzf nexium.tar.gz
 ./nexium --version
 ```
@@ -157,7 +157,8 @@ curl -X POST http://127.0.0.1:9222/browser/snapshot \
 Endpoints: `/health`, `/browser/{create,close,status,navigate,back,forward,
 reload,click,type,press,scroll,hover,screenshot,snapshot,extract,evaluate,
 tabs,tabs/create,tabs/close,tabs/switch,session/save,session/restore,network,
-console,dom}`, `/ws`, `/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
+console,dom}`, `/memory` (process RSS/VSZ/threads + system memory), `/ws`,
+`/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
 adapters share the same engine — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
 
 Responses use `{"ok":true,"data":...}` or structured errors. Authentication
