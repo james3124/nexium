@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use boa_engine::object::ObjectInitializer;
-use boa_engine::object::builtins::JsArray;
-use boa_engine::property::Attribute;
+use boa_engine::object::builtins::{JsArray, JsProxy};
+use boa_engine::property::{Attribute, PropertyKey};
+use boa_engine::symbol::JsSymbol;
 use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, NativeFunction, Source};
 
 use super::events;
@@ -92,11 +93,14 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
     let inner_text = accessor(get_inner_text, Some(set_inner_text));
     let scripts = accessor(get_scripts, None);
     let inner_html = accessor(get_inner_html, Some(set_inner_html));
-    let outer_html = accessor(get_outer_html, None);
+    let outer_html = accessor(get_outer_html, Some(set_outer_html));
     let id = accessor(get_id, Some(set_id));
     let class_name = accessor(get_class_name, Some(set_class_name));
     let tag_name = accessor(get_tag_name, None);
+    let node_type = accessor(get_node_type, None);
     let parent_node = accessor(get_parent_node, None);
+    let parent_element = accessor(get_parent_element, None);
+    let dataset = accessor(get_dataset, None);
     let first_child = accessor(get_first_child, None);
     let last_child = accessor(get_last_child, None);
     let next_sibling = accessor(get_next_sibling, None);
@@ -174,9 +178,21 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             Attribute::all(),
         )
         .accessor(
+            JsString::from("nodeType"),
+            Some(node_type.0),
+            node_type.1,
+            Attribute::all(),
+        )
+        .accessor(
             JsString::from("parentNode"),
             Some(parent_node.0),
             parent_node.1,
+            Attribute::all(),
+        )
+        .accessor(
+            JsString::from("parentElement"),
+            Some(parent_element.0),
+            parent_element.1,
             Attribute::all(),
         )
         .accessor(
@@ -225,6 +241,12 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             JsString::from("classList"),
             Some(class_list.0),
             class_list.1,
+            Attribute::all(),
+        )
+        .accessor(
+            JsString::from("dataset"),
+            Some(dataset.0),
+            dataset.1,
             Attribute::all(),
         )
         .accessor(
@@ -284,7 +306,7 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             Attribute::all(),
         );
 
-    let methods: [(&str, NativeFunction, usize); 28] = [
+    let methods: [(&str, NativeFunction, usize); 36] = [
         (
             "getAttribute",
             NativeFunction::from_fn_ptr(js_get_attribute),
@@ -320,6 +342,11 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             NativeFunction::from_fn_ptr(js_insert_adjacent_html),
             2,
         ),
+        (
+            "insertAdjacentText",
+            NativeFunction::from_fn_ptr(js_insert_adjacent_text),
+            2,
+        ),
         ("prepend", NativeFunction::from_fn_ptr(js_prepend), 0),
         ("append", NativeFunction::from_fn_ptr(js_append), 0),
         (
@@ -327,6 +354,14 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             NativeFunction::from_fn_ptr(js_remove_child),
             1,
         ),
+        (
+            "replaceChild",
+            NativeFunction::from_fn_ptr(js_replace_child),
+            2,
+        ),
+        ("cloneNode", NativeFunction::from_fn_ptr(js_clone_node), 1),
+        ("matches", NativeFunction::from_fn_ptr(js_matches), 1),
+        ("closest", NativeFunction::from_fn_ptr(js_closest), 1),
         (
             "querySelector",
             NativeFunction::from_fn_ptr(js_query_selector),
@@ -340,6 +375,11 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
         (
             "getElementsByTagName",
             NativeFunction::from_fn_ptr(js_get_elements_by_tag_name),
+            1,
+        ),
+        (
+            "getElementsByClassName",
+            NativeFunction::from_fn_ptr(js_get_elements_by_class_name),
             1,
         ),
         (
@@ -363,6 +403,11 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             1,
         ),
         (
+            "createElementNS",
+            NativeFunction::from_fn_ptr(js_create_element_ns),
+            2,
+        ),
+        (
             "createTextNode",
             NativeFunction::from_fn_ptr(js_create_text_node),
             1,
@@ -371,6 +416,11 @@ fn build_node_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> 
             "createComment",
             NativeFunction::from_fn_ptr(js_create_comment),
             1,
+        ),
+        (
+            "createDocumentFragment",
+            NativeFunction::from_fn_ptr(js_create_document_fragment),
+            0,
         ),
         (
             "addEventListener",
@@ -563,6 +613,50 @@ fn set_inner_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     Ok(JsValue::undefined())
 }
 
+/// Resolve the insertion point for `insertAdjacent*` methods.
+///
+/// Returns `None` when `node` has no parent (the call is a no-op), otherwise
+/// the parent and the reference child to insert before.
+fn adjacent_insertion_point(
+    document: &Document,
+    node: NodeId,
+    position: &str,
+    method: &str,
+) -> JsResult<Option<(NodeId, Option<NodeId>)>> {
+    let content = |node: NodeId| {
+        document
+            .element(node)
+            .and_then(|element| element.template_contents)
+            .unwrap_or(node)
+    };
+    match position {
+        "beforebegin" => {
+            let Some(parent) = document.parent(node) else {
+                return Ok(None);
+            };
+            Ok(Some((parent, Some(node))))
+        }
+        "afterbegin" => {
+            let target = content(node);
+            let first = document.children(target).first().copied();
+            Ok(Some((target, first)))
+        }
+        "beforeend" => Ok(Some((content(node), None))),
+        "afterend" => {
+            let Some(parent) = document.parent(node) else {
+                return Ok(None);
+            };
+            let children = document.children(parent);
+            let reference = children
+                .iter()
+                .position(|&child| child == node)
+                .and_then(|index| children.get(index + 1).copied());
+            Ok(Some((parent, reference)))
+        }
+        _ => Err(host_error(format!("invalid {method} position: {position}"))),
+    }
+}
+
 fn js_insert_adjacent_html(
     this: &JsValue,
     args: &[JsValue],
@@ -579,43 +673,11 @@ fn js_insert_adjacent_html(
         .descendants(parsed.document_node())
         .into_iter()
         .find(|&id| parsed.tag_name(id) == Some("body"));
-
-    let content = |node: NodeId| {
-        document
-            .borrow()
-            .element(node)
-            .and_then(|element| element.template_contents)
-            .unwrap_or(node)
+    let point = {
+        let document_ref = document.borrow();
+        adjacent_insertion_point(&document_ref, node, &position, "insertAdjacentHTML")?
     };
-    let (parent, reference) = match position.as_str() {
-        "beforebegin" => {
-            let parent = document.borrow().parent(node);
-            (parent, parent.map(|_| node))
-        }
-        "afterbegin" => {
-            let target = content(node);
-            let first = document.borrow().children(target).first().copied();
-            (Some(target), first)
-        }
-        "beforeend" => (Some(content(node)), None),
-        "afterend" => {
-            let parent = document.borrow().parent(node);
-            let reference = parent.and_then(|parent| {
-                let children = document.borrow().children(parent).to_vec();
-                children
-                    .iter()
-                    .position(|&child| child == node)
-                    .and_then(|index| children.get(index + 1).copied())
-            });
-            (parent, reference)
-        }
-        _ => {
-            return Err(host_error(format!(
-                "invalid insertAdjacentHTML position: {position}"
-            )));
-        }
-    };
-    let Some(parent) = parent else {
+    let Some((parent, reference)) = point else {
         return Ok(JsValue::undefined());
     };
 
@@ -635,6 +697,70 @@ fn js_insert_adjacent_html(
         }
     }
     observers::record_child_list(parent, &added, &[]);
+    Ok(JsValue::undefined())
+}
+
+fn js_insert_adjacent_text(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let position = string_arg(args, 0, context)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let text = string_arg(args, 1, context).unwrap_or_default();
+    let document = document()?;
+    let point = {
+        let document_ref = document.borrow();
+        adjacent_insertion_point(&document_ref, node, &position, "insertAdjacentText")?
+    };
+    let Some((parent, reference)) = point else {
+        return Ok(JsValue::undefined());
+    };
+    let text_id = document.borrow_mut().create_text(text);
+    document
+        .borrow_mut()
+        .insert_before(parent, text_id, reference)
+        .map_err(|error| host_error(error.to_string()))?;
+    observers::record_child_list(parent, &[text_id], &[]);
+    Ok(JsValue::undefined())
+}
+
+fn set_outer_html(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let html = string_arg(args, 0, context).unwrap_or_default();
+    let document = document()?;
+    let (parent, is_element) = {
+        let document_ref = document.borrow();
+        (document_ref.parent(node), document_ref.is_element(node))
+    };
+    // Documents and detached nodes have no place to insert the replacement.
+    let Some(parent) = parent.filter(|_| is_element) else {
+        return Ok(JsValue::undefined());
+    };
+    let parsed = parse_html(&html);
+    let body = find_element(&parsed, "body");
+    let mut added = Vec::new();
+    if let Some(body) = body {
+        for child in parsed.children(body).to_vec() {
+            let imported = {
+                let mut target = document.borrow_mut();
+                import_subtree(&mut target, &parsed, child)
+            };
+            if let Some(imported) = imported {
+                let _ = document
+                    .borrow_mut()
+                    .insert_before(parent, imported, Some(node));
+                added.push(imported);
+            }
+        }
+    }
+    let _ = document.borrow_mut().remove_child(parent, node);
+    observers::record_child_list(parent, &added, &[node]);
+    for id in added {
+        maybe_execute_script(id, context);
+    }
     Ok(JsValue::undefined())
 }
 
@@ -744,9 +870,40 @@ fn get_tag_name(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsR
     Ok(js_string_value(&name))
 }
 
+fn get_node_type(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let document = document()?;
+    let document = document.borrow();
+    let node_type = match &document.node(node).data {
+        NodeData::Element(_) => 1,
+        NodeData::Text(_) => 3,
+        NodeData::Comment(_) => 8,
+        NodeData::Document => 9,
+        NodeData::Doctype(_) => 10,
+        NodeData::DocumentFragment => 11,
+    };
+    Ok(JsValue::from(node_type))
+}
+
 fn get_parent_node(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node = node_of(this, context)?;
     let parent = document()?.borrow().parent(node);
+    wrap_or_null(parent, context)
+}
+
+fn get_parent_element(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let parent = {
+        let document = document()?;
+        let document = document.borrow();
+        document
+            .parent(node)
+            .filter(|&parent| document.is_element(parent))
+    };
     wrap_or_null(parent, context)
 }
 
@@ -795,30 +952,486 @@ fn get_previous_sibling(
     sibling(this, context, false)
 }
 
-fn children_array(node: NodeId, elements_only: bool, context: &mut Context) -> JsResult<JsValue> {
-    let ids: Vec<NodeId> = {
-        let document = document()?;
-        let document = document.borrow();
-        document
-            .children(node)
-            .iter()
-            .copied()
-            .filter(|&child| !elements_only || document.is_element(child))
-            .collect()
-    };
-    let array = JsArray::new(context)?;
-    for id in ids {
-        array.push(wrap_node(id, context)?, context)?;
-    }
-    Ok(JsValue::from(array))
-}
-
 fn get_children(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    children_array(node_of(this, context)?, true, context)
+    build_collection(
+        CollectionSource::Children {
+            owner: node_of(this, context)?,
+        },
+        context,
+    )
 }
 
 fn get_child_nodes(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    children_array(node_of(this, context)?, false, context)
+    build_collection(
+        CollectionSource::ChildNodes {
+            owner: node_of(this, context)?,
+        },
+        context,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// NodeList / HTMLCollection
+//
+// `querySelectorAll` produces a *static* collection (a snapshot of the nodes
+// that matched at the time of the call), while `childNodes`, `children`,
+// `getElementsByTagName` and `getElementsByClassName` produce *live*
+// collections that re-query the document on every property read. The live
+// behaviour is implemented with a Proxy whose `get` trap resolves `length` and
+// numeric indices on demand.
+// ---------------------------------------------------------------------------
+
+const COLLECTION_SOURCE_KEY: &str = "__nexium_collection_source";
+const ITERATOR_IDS_KEY: &str = "__nexium_iterator_ids";
+const ITERATOR_INDEX_KEY: &str = "__nexium_iterator_index";
+const ITERATOR_KIND_KEY: &str = "__nexium_iterator_kind";
+
+#[derive(Clone)]
+enum CollectionSource {
+    Static(Vec<NodeId>),
+    ChildNodes { owner: NodeId },
+    Children { owner: NodeId },
+    ByTag { owner: NodeId, tag: String },
+    ByClass { owner: NodeId, names: Vec<String> },
+}
+
+/// Resolve the current list of node ids for a collection source.
+fn source_ids(source: &CollectionSource) -> Vec<NodeId> {
+    let Some(handle) = document_rc() else {
+        return Vec::new();
+    };
+    let document = handle.borrow();
+    match source {
+        CollectionSource::Static(ids) => ids.clone(),
+        CollectionSource::ChildNodes { owner } => document.children(*owner).to_vec(),
+        CollectionSource::Children { owner } => document
+            .children(*owner)
+            .iter()
+            .copied()
+            .filter(|&id| document.is_element(id))
+            .collect(),
+        CollectionSource::ByTag { owner, tag } => document
+            .descendants(*owner)
+            .into_iter()
+            .filter(|&id| {
+                tag == "*"
+                    || document
+                        .element(id)
+                        .is_some_and(|element| element.name.eq_ignore_ascii_case(tag))
+            })
+            .collect(),
+        CollectionSource::ByClass { owner, names } => document
+            .descendants(*owner)
+            .into_iter()
+            .filter(|&id| {
+                document.element(id).is_some_and(|element| {
+                    names
+                        .iter()
+                        .all(|name| element.classes().any(|class| class == name))
+                })
+            })
+            .collect(),
+    }
+}
+
+fn write_source(source: &CollectionSource, context: &mut Context) -> JsResult<JsObject> {
+    let descriptor = ObjectInitializer::new(context).build();
+    let (mode, ids, owner, tag, names) = match source {
+        CollectionSource::Static(ids) => (0u32, Some(ids), None, None, None),
+        CollectionSource::ChildNodes { owner } => (1, None, Some(owner), None, None),
+        CollectionSource::Children { owner } => (2, None, Some(owner), None, None),
+        CollectionSource::ByTag { owner, tag } => (3, None, Some(owner), Some(tag), None),
+        CollectionSource::ByClass { owner, names } => (4, None, Some(owner), None, Some(names)),
+    };
+    descriptor.set(JsString::from("mode"), JsValue::from(mode), false, context)?;
+    if let Some(ids) = ids {
+        let array = JsArray::new(context)?;
+        for id in ids {
+            array.push(JsValue::from(id.index() as f64), context)?;
+        }
+        descriptor.set(JsString::from("ids"), JsValue::from(array), false, context)?;
+    }
+    if let Some(owner) = owner {
+        descriptor.set(
+            JsString::from("owner"),
+            JsValue::from(owner.index() as f64),
+            false,
+            context,
+        )?;
+    }
+    if let Some(tag) = tag {
+        descriptor.set(JsString::from("tag"), js_string_value(tag), false, context)?;
+    }
+    if let Some(names) = names {
+        let array = JsArray::new(context)?;
+        for name in names {
+            array.push(js_string_value(name), context)?;
+        }
+        descriptor.set(
+            JsString::from("names"),
+            JsValue::from(array),
+            false,
+            context,
+        )?;
+    }
+    Ok(descriptor)
+}
+
+fn read_source(this: &JsValue, context: &mut Context) -> JsResult<CollectionSource> {
+    let object = this
+        .as_object()
+        .ok_or_else(|| host_error("invalid NodeList receiver"))?;
+    let value = object.get(JsString::from(COLLECTION_SOURCE_KEY), context)?;
+    let descriptor = value
+        .as_object()
+        .ok_or_else(|| host_error("invalid NodeList source"))?;
+    let mode = descriptor
+        .get(JsString::from("mode"), context)?
+        .as_number()
+        .unwrap_or(0.0) as u32;
+    let owner = descriptor
+        .get(JsString::from("owner"), context)
+        .ok()
+        .and_then(|value| value.as_number())
+        .and_then(|value| (value >= 0.0).then(|| NodeId::from_index(value as usize)));
+    match mode {
+        0 => {
+            let ids = descriptor
+                .get(JsString::from("ids"), context)?
+                .as_object()
+                .and_then(|object| JsArray::from_object(object.clone()).ok());
+            let mut result = Vec::new();
+            if let Some(ids) = ids {
+                for index in 0..ids.length(context)? {
+                    if let Some(value) = ids
+                        .get(index, context)
+                        .ok()
+                        .and_then(|value| value.as_number())
+                        .and_then(|value| {
+                            (value >= 0.0).then(|| NodeId::from_index(value as usize))
+                        })
+                    {
+                        result.push(value);
+                    }
+                }
+            }
+            Ok(CollectionSource::Static(result))
+        }
+        1 => Ok(CollectionSource::ChildNodes {
+            owner: owner.ok_or_else(|| host_error("invalid NodeList owner"))?,
+        }),
+        2 => Ok(CollectionSource::Children {
+            owner: owner.ok_or_else(|| host_error("invalid NodeList owner"))?,
+        }),
+        3 => {
+            let tag = descriptor
+                .get(JsString::from("tag"), context)
+                .ok()
+                .map(|value| value_to_display(&value, context))
+                .unwrap_or_default();
+            Ok(CollectionSource::ByTag {
+                owner: owner.ok_or_else(|| host_error("invalid NodeList owner"))?,
+                tag,
+            })
+        }
+        4 => {
+            let names = descriptor
+                .get(JsString::from("names"), context)
+                .ok()
+                .and_then(|value| value.as_object())
+                .and_then(|object| JsArray::from_object(object).ok());
+            let mut result = Vec::new();
+            if let Some(names) = names {
+                for index in 0..names.length(context)? {
+                    if let Ok(value) = names.get(index, context) {
+                        result.push(value_to_display(&value, context));
+                    }
+                }
+            }
+            Ok(CollectionSource::ByClass {
+                owner: owner.ok_or_else(|| host_error("invalid NodeList owner"))?,
+                names: result,
+            })
+        }
+        _ => Ok(CollectionSource::Static(Vec::new())),
+    }
+}
+
+/// Convert a `item()` index argument following WebIDL-style rules. Returns
+/// `None` for values that cannot address an element (no argument, NaN,
+/// negative or infinite values); fractional values are truncated toward zero.
+fn item_index(args: &[JsValue], context: &mut Context) -> Option<usize> {
+    let value = args.first()?;
+    if value.is_null_or_undefined() {
+        return None;
+    }
+    let number = value.to_number(context).ok()?;
+    if number.is_nan() || number.is_infinite() || number < 0.0 {
+        return None;
+    }
+    Some(number.trunc() as usize)
+}
+
+fn collection_item(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(index) = item_index(args, context) else {
+        return Ok(JsValue::null());
+    };
+    let source = read_source(this, context)?;
+    let ids = source_ids(&source);
+    match ids.get(index) {
+        Some(&id) => wrap_node(id, context),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn make_iterator(ids: Vec<NodeId>, kind: u32, context: &mut Context) -> JsResult<JsValue> {
+    let realm = context.realm().clone();
+    let array = JsArray::new(context)?;
+    for id in ids {
+        array.push(JsValue::from(id.index() as f64), context)?;
+    }
+    let object = ObjectInitializer::new(context)
+        .property(
+            JsString::from(ITERATOR_IDS_KEY),
+            JsValue::from(array),
+            Attribute::empty(),
+        )
+        .property(
+            JsString::from(ITERATOR_INDEX_KEY),
+            JsValue::from(0.0),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from(ITERATOR_KIND_KEY),
+            JsValue::from(kind),
+            Attribute::empty(),
+        )
+        .property(
+            JsString::from("next"),
+            NativeFunction::from_fn_ptr(iterator_next).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsSymbol::iterator(),
+            NativeFunction::from_fn_ptr(iterator_self).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .build();
+    object.set(
+        JsSymbol::to_string_tag(),
+        js_string_value("NodeList Iterator"),
+        false,
+        context,
+    )?;
+    Ok(JsValue::from(object))
+}
+
+fn iterator_self(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(this.clone())
+}
+
+fn iterator_next(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let object = this
+        .as_object()
+        .ok_or_else(|| host_error("invalid NodeList iterator"))?;
+    let ids = object
+        .get(JsString::from(ITERATOR_IDS_KEY), context)?
+        .as_object()
+        .and_then(|object| JsArray::from_object(object.clone()).ok())
+        .ok_or_else(|| host_error("invalid NodeList iterator ids"))?;
+    let length = ids.length(context)?;
+    let index = object
+        .get(JsString::from(ITERATOR_INDEX_KEY), context)?
+        .as_number()
+        .unwrap_or(0.0) as u64;
+    let kind = object
+        .get(JsString::from(ITERATOR_KIND_KEY), context)?
+        .as_number()
+        .unwrap_or(0.0) as u32;
+    if index >= length {
+        return Ok(iter_result(JsValue::undefined(), true, context)?);
+    }
+    object.set(
+        JsString::from(ITERATOR_INDEX_KEY),
+        JsValue::from((index + 1) as f64),
+        false,
+        context,
+    )?;
+    let id_value = ids.get(index, context)?;
+    let node = id_value
+        .as_number()
+        .and_then(|value| (value >= 0.0).then(|| NodeId::from_index(value as usize)))
+        .map(|id| wrap_node(id, context))
+        .transpose()?
+        .unwrap_or(JsValue::undefined());
+    let value = match kind {
+        1 => JsValue::from(index as f64),
+        2 => {
+            let pair = JsArray::new(context)?;
+            pair.push(JsValue::from(index as f64), context)?;
+            pair.push(node, context)?;
+            JsValue::from(pair)
+        }
+        _ => node,
+    };
+    iter_result(value, false, context)
+}
+
+fn iter_result(value: JsValue, done: bool, context: &mut Context) -> JsResult<JsValue> {
+    let object = ObjectInitializer::new(context)
+        .property(JsString::from("value"), value, Attribute::all())
+        .property(
+            JsString::from("done"),
+            JsValue::from(done),
+            Attribute::all(),
+        )
+        .build();
+    Ok(JsValue::from(object))
+}
+
+fn collection_for_each(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first().and_then(JsValue::as_function) else {
+        return Ok(JsValue::undefined());
+    };
+    let this_arg = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    let source = read_source(this, context)?;
+    let ids = source_ids(&source);
+    // Snapshot the nodes so callbacks that mutate the document do not skip
+    // entries (matching the "live but pre-counted" behaviour of browsers).
+    let nodes = ids
+        .into_iter()
+        .map(|id| wrap_node(id, context))
+        .collect::<JsResult<Vec<_>>>()?;
+    for (index, node) in nodes.into_iter().enumerate() {
+        callback.call(
+            &this_arg,
+            &[node, JsValue::from(index as f64), this.clone()],
+            context,
+        )?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn collection_values(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = read_source(this, context)?;
+    make_iterator(source_ids(&source), 0, context)
+}
+
+fn collection_keys(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let source = read_source(this, context)?;
+    make_iterator(source_ids(&source), 1, context)
+}
+
+fn collection_entries(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source = read_source(this, context)?;
+    make_iterator(source_ids(&source), 2, context)
+}
+
+fn collection_symbol_iterator(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    collection_values(this, _args, context)
+}
+
+fn collection_get(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // A `get` proxy trap is called with «target, propertyKey, receiver».
+    let target = args.first().cloned().unwrap_or(JsValue::undefined());
+    let key = args.get(1).cloned().unwrap_or(JsValue::undefined());
+    if let Some(name) = key.as_string() {
+        let name = name.to_std_string_escaped();
+        if name == "length" {
+            let source = read_source(&target, context)?;
+            return Ok(JsValue::from(source_ids(&source).len() as f64));
+        }
+        if let Ok(index) = name.parse::<u64>() {
+            // Canonical array indices never have leading zeroes.
+            if index.to_string() == name {
+                let source = read_source(&target, context)?;
+                let ids = source_ids(&source);
+                return match ids.get(index as usize) {
+                    Some(&id) => wrap_node(id, context),
+                    None => Ok(JsValue::undefined()),
+                };
+            }
+        }
+    }
+    let object = target
+        .as_object()
+        .ok_or_else(|| host_error("invalid NodeList target"))?;
+    let property: PropertyKey = if let Some(string) = key.as_string() {
+        PropertyKey::from(string)
+    } else if let Some(symbol) = key.as_symbol() {
+        PropertyKey::from(symbol)
+    } else {
+        PropertyKey::from(JsString::from(value_to_display(&key, context)))
+    };
+    object.get(property, context)
+}
+
+fn build_collection(source: CollectionSource, context: &mut Context) -> JsResult<JsValue> {
+    let realm = context.realm().clone();
+    let descriptor = write_source(&source, context)?;
+    let target = ObjectInitializer::new(context)
+        .property(
+            JsString::from(COLLECTION_SOURCE_KEY),
+            JsValue::from(descriptor),
+            Attribute::empty(),
+        )
+        .property(
+            JsString::from("item"),
+            NativeFunction::from_fn_ptr(collection_item).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("forEach"),
+            NativeFunction::from_fn_ptr(collection_for_each).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("keys"),
+            NativeFunction::from_fn_ptr(collection_keys).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("values"),
+            NativeFunction::from_fn_ptr(collection_values).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("entries"),
+            NativeFunction::from_fn_ptr(collection_entries).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .property(
+            JsSymbol::iterator(),
+            NativeFunction::from_fn_ptr(collection_symbol_iterator).to_js_function(&realm),
+            Attribute::all(),
+        )
+        .build();
+    target.set(
+        JsSymbol::to_string_tag(),
+        js_string_value("NodeList"),
+        false,
+        context,
+    )?;
+    let proxy = JsProxy::builder(target)
+        .get(collection_get)
+        .build(context)?;
+    Ok(JsValue::from(proxy))
 }
 
 fn js_get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -873,6 +1486,45 @@ fn js_remove_attribute(
     Ok(JsValue::undefined())
 }
 
+/// Insert `child` (or the children of a document fragment) into `parent`
+/// before `reference`. Returns the ids that were actually inserted.
+fn insert_into_parent(
+    parent: NodeId,
+    child: NodeId,
+    reference: Option<NodeId>,
+    context: &mut Context,
+) -> JsResult<Vec<NodeId>> {
+    let document = document()?;
+    let fragment_children = {
+        let document_ref = document.borrow();
+        match document_ref.node(child).data {
+            NodeData::DocumentFragment => Some(document_ref.children(child).to_vec()),
+            _ => None,
+        }
+    };
+    let mut inserted = Vec::new();
+    match fragment_children {
+        Some(children) => {
+            for child in children {
+                document
+                    .borrow_mut()
+                    .insert_before(parent, child, reference)
+                    .map_err(|error| host_error(error.to_string()))?;
+                inserted.push(child);
+            }
+        }
+        None => {
+            document
+                .borrow_mut()
+                .insert_before(parent, child, reference)
+                .map_err(|error| host_error(error.to_string()))?;
+            inserted.push(child);
+        }
+    }
+    let _ = context;
+    Ok(inserted)
+}
+
 fn js_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let parent = node_of(this, context)?;
     let Some(child) = args.first() else {
@@ -883,12 +1535,11 @@ fn js_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> J
     };
     let child = node_id_from_object(&child_object, context)
         .ok_or_else(|| host_error("appendChild requires a node"))?;
-    document()?
-        .borrow_mut()
-        .append_child(parent, child)
-        .map_err(|error| host_error(error.to_string()))?;
-    observers::record_child_list(parent, &[child], &[]);
-    maybe_execute_script(child, context);
+    let added = insert_into_parent(parent, child, None, context)?;
+    observers::record_child_list(parent, &added, &[]);
+    for id in added {
+        maybe_execute_script(id, context);
+    }
     Ok(child_object.into())
 }
 
@@ -903,13 +1554,144 @@ fn js_insert_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .get(1)
         .and_then(JsValue::as_object)
         .and_then(|object| node_id_from_object(&object, context));
+    let added = insert_into_parent(parent, child, reference, context)?;
+    observers::record_child_list(parent, &added, &[]);
+    for id in added {
+        maybe_execute_script(id, context);
+    }
+    Ok(args.first().cloned().unwrap_or(JsValue::undefined()))
+}
+
+fn js_replace_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent = node_of(this, context)?;
+    let new_object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| host_error("replaceChild requires a node"))?;
+    let new_child = node_id_from_object(&new_object, context)
+        .ok_or_else(|| host_error("replaceChild requires a node"))?;
+    let old_object = args
+        .get(1)
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| host_error("replaceChild requires a node"))?;
+    let old_child = node_id_from_object(&old_object, context)
+        .ok_or_else(|| host_error("replaceChild requires a node"))?;
+    if new_child == old_child {
+        return Ok(args[1].clone());
+    }
+    {
+        let document = document()?;
+        if document.borrow().parent(old_child) != Some(parent) {
+            return Err(host_error(
+                "replaceChild: the node to replace is not a child of this node",
+            ));
+        }
+    }
+    let added = insert_into_parent(parent, new_child, Some(old_child), context)?;
     document()?
         .borrow_mut()
-        .insert_before(parent, child, reference)
+        .remove_child(parent, old_child)
         .map_err(|error| host_error(error.to_string()))?;
-    observers::record_child_list(parent, &[child], &[]);
-    maybe_execute_script(child, context);
-    Ok(args.first().cloned().unwrap_or(JsValue::undefined()))
+    observers::record_child_list(parent, &added, &[old_child]);
+    for id in added {
+        maybe_execute_script(id, context);
+    }
+    Ok(args[1].clone())
+}
+
+fn js_clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let deep = args.first().is_some_and(JsValue::to_boolean);
+    let document = document()?;
+    let clone = clone_node_within(&mut document.borrow_mut(), node, deep)?;
+    wrap_node(clone, context)
+}
+
+fn clone_node_within(document: &mut Document, node: NodeId, deep: bool) -> JsResult<NodeId> {
+    match document.node(node).data.clone() {
+        NodeData::Element(element) => {
+            let clone = document.create_element_ns(
+                &element.name,
+                element.namespace,
+                element.attributes.clone(),
+            );
+            if deep {
+                if let Some(template) = element.template_contents {
+                    let fragment = document.create_document_fragment();
+                    for child in document.children(template).to_vec() {
+                        let cloned = clone_node_within(document, child, true)?;
+                        let _ = document.append_child(fragment, cloned);
+                    }
+                    if let Some(cloned_element) = document.element_mut(clone) {
+                        cloned_element.template_contents = Some(fragment);
+                    }
+                }
+                for child in document.children(node).to_vec() {
+                    let cloned = clone_node_within(document, child, true)?;
+                    let _ = document.append_child(clone, cloned);
+                }
+            }
+            Ok(clone)
+        }
+        NodeData::Text(text) => Ok(document.create_text(text)),
+        NodeData::Comment(text) => Ok(document.create_comment(text)),
+        NodeData::Doctype(doctype) => {
+            Ok(document.create_doctype(&doctype.name, &doctype.public_id, &doctype.system_id))
+        }
+        NodeData::DocumentFragment => {
+            let fragment = document.create_document_fragment();
+            if deep {
+                for child in document.children(node).to_vec() {
+                    let cloned = clone_node_within(document, child, true)?;
+                    let _ = document.append_child(fragment, cloned);
+                }
+            }
+            Ok(fragment)
+        }
+        NodeData::Document => Err(host_error("cloneNode is not supported for Document")),
+    }
+}
+
+fn js_matches(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let Some(selector) = string_arg(args, 0, context) else {
+        return Ok(JsValue::from(false));
+    };
+    let document = document()?;
+    let document_ref = document.borrow();
+    if !document_ref.is_element(node) {
+        return Ok(JsValue::from(false));
+    }
+    let matched = document_ref
+        .matches(node, &selector)
+        .map_err(|error| host_error(error.to_string()))?;
+    Ok(JsValue::from(matched))
+}
+
+fn js_closest(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let Some(selector) = string_arg(args, 0, context) else {
+        return Ok(JsValue::null());
+    };
+    let found = {
+        let document = document()?;
+        let document_ref = document.borrow();
+        let mut current = Some(node);
+        let mut found = None;
+        while let Some(id) = current {
+            if document_ref.is_element(id)
+                && document_ref
+                    .matches(id, &selector)
+                    .map_err(|error| host_error(error.to_string()))?
+            {
+                found = Some(id);
+                break;
+            }
+            current = document_ref.parent(id);
+        }
+        found
+    };
+    wrap_or_null(found, context)
 }
 
 fn node_ids_from_args(args: &[JsValue], context: &mut Context) -> JsResult<Vec<NodeId>> {
@@ -934,13 +1716,11 @@ fn js_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
     let reference = document()?.borrow().children(parent).first().copied();
     let mut added = Vec::new();
     for id in ids {
-        if document()?
-            .borrow_mut()
-            .insert_before(parent, id, reference)
-            .is_ok()
-        {
-            added.push(id);
-            maybe_execute_script(id, context);
+        if let Ok(inserted) = insert_into_parent(parent, id, reference, context) {
+            for inserted in inserted {
+                maybe_execute_script(inserted, context);
+                added.push(inserted);
+            }
         }
     }
     observers::record_child_list(parent, &added, &[]);
@@ -952,9 +1732,11 @@ fn js_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
     let ids = node_ids_from_args(args, context)?;
     let mut added = Vec::new();
     for id in ids {
-        if document()?.borrow_mut().append_child(parent, id).is_ok() {
-            added.push(id);
-            maybe_execute_script(id, context);
+        if let Ok(inserted) = insert_into_parent(parent, id, None, context) {
+            for inserted in inserted {
+                maybe_execute_script(inserted, context);
+                added.push(inserted);
+            }
         }
     }
     observers::record_child_list(parent, &added, &[]);
@@ -1005,17 +1787,13 @@ fn js_query_selector_all(
 ) -> JsResult<JsValue> {
     let root = node_of(this, context)?;
     let Some(selector) = string_arg(args, 0, context) else {
-        return Ok(JsValue::from(JsArray::new(context)?));
+        return build_collection(CollectionSource::Static(Vec::new()), context);
     };
     let ids = document()?
         .borrow()
         .query_selector_all(root, &selector)
         .map_err(|error| host_error(error.to_string()))?;
-    let array = JsArray::new(context)?;
-    for id in ids {
-        array.push(wrap_node(id, context)?, context)?;
-    }
-    Ok(JsValue::from(array))
+    build_collection(CollectionSource::Static(ids), context)
 }
 
 fn js_get_elements_by_tag_name(
@@ -1025,28 +1803,33 @@ fn js_get_elements_by_tag_name(
 ) -> JsResult<JsValue> {
     let root = node_of(this, context)?;
     let Some(tag) = string_arg(args, 0, context) else {
-        return Ok(JsValue::from(JsArray::new(context)?));
+        return build_collection(CollectionSource::Static(Vec::new()), context);
     };
-    let tag = tag.to_ascii_lowercase();
-    let ids: Vec<NodeId> = {
-        let document = document()?;
-        let document = document.borrow();
-        document
-            .descendants(root)
-            .into_iter()
-            .filter(|&id| {
-                tag == "*"
-                    || document
-                        .element(id)
-                        .is_some_and(|element| element.name.eq_ignore_ascii_case(&tag))
-            })
-            .collect()
+    build_collection(
+        CollectionSource::ByTag {
+            owner: root,
+            tag: tag.to_ascii_lowercase(),
+        },
+        context,
+    )
+}
+
+fn js_get_elements_by_class_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let root = node_of(this, context)?;
+    let Some(names) = string_arg(args, 0, context) else {
+        return build_collection(CollectionSource::Static(Vec::new()), context);
     };
-    let array = JsArray::new(context)?;
-    for id in ids {
-        array.push(wrap_node(id, context)?, context)?;
-    }
-    Ok(JsValue::from(array))
+    build_collection(
+        CollectionSource::ByClass {
+            owner: root,
+            names: names.split_ascii_whitespace().map(str::to_owned).collect(),
+        },
+        context,
+    )
 }
 
 fn camel_case(name: &str) -> String {
@@ -1065,16 +1848,44 @@ fn camel_case(name: &str) -> String {
     camel
 }
 
+/// Normalize a CSS property name to its canonical dashed form. Custom
+/// properties (`--*`) are returned verbatim (they are case-sensitive).
+/// Both dashed (`background-color`) and camelCase (`backgroundColor`) inputs
+/// are accepted so `getPropertyValue`/`setProperty` behave like browsers that
+/// tolerate either spelling for standard properties.
+fn normalize_css_property(name: &str) -> String {
+    if name.starts_with("--") {
+        return name.to_owned();
+    }
+    let mut kebab = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index != 0 {
+                kebab.push('-');
+            }
+            kebab.push(character.to_ascii_lowercase());
+        } else {
+            kebab.push(character);
+        }
+    }
+    kebab
+}
+
 fn js_style_get_property(
     this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let name = string_arg(args, 0, context).unwrap_or_default();
-    let name = name.to_ascii_lowercase();
+    let name = normalize_css_property(&string_arg(args, 0, context).unwrap_or_default());
     let Some(object) = this.as_object() else {
         return Ok(js_string_value(""));
     };
+    // Inline style objects carry the owning node id; computed-style objects
+    // carry a snapshot map instead.
+    if node_id_from_object(&object, context).is_some() {
+        let node = node_of(this, context)?;
+        return style_get(node, &name, context);
+    }
     let map = object.get(JsString::from("__nexium_style"), context)?;
     let Some(map) = map.as_object() else {
         return Ok(js_string_value(""));
@@ -1088,11 +1899,22 @@ fn js_style_get_property(
 }
 
 fn js_style_get_priority(
-    _this: &JsValue,
-    _args: &[JsValue],
-    _context: &mut Context,
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
 ) -> JsResult<JsValue> {
-    Ok(js_string_value(""))
+    let Some(object) = this.as_object() else {
+        return Ok(js_string_value(""));
+    };
+    if node_id_from_object(&object, context).is_none() {
+        return Ok(js_string_value(""));
+    }
+    let name = normalize_css_property(&string_arg(args, 0, context).unwrap_or_default());
+    let node = node_of(this, context)?;
+    let important = inline_declaration(node, context)
+        .iter()
+        .any(|declaration| declaration.name == name && declaration.important);
+    Ok(js_string_value(if important { "important" } else { "" }))
 }
 
 pub(crate) fn js_get_computed_style(
@@ -1273,6 +2095,45 @@ fn js_create_element(this: &JsValue, args: &[JsValue], context: &mut Context) ->
             document.create_element(&tag)
         }
     };
+    wrap_node(id, context)
+}
+
+fn js_create_element_ns(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let _root = node_of(this, context)?;
+    let namespace = string_arg(args, 0, context);
+    let Some(qualified) = string_arg(args, 1, context) else {
+        return Err(host_error("createElementNS requires a qualified name"));
+    };
+    if qualified.is_empty() {
+        return Err(host_error("createElementNS requires a qualified name"));
+    }
+    let namespace = match namespace.as_deref() {
+        None | Some("") | Some("http://www.w3.org/1999/xhtml") => Namespace::Html,
+        Some("http://www.w3.org/2000/svg") => Namespace::Svg,
+        Some("http://www.w3.org/1998/Math/MathML") => Namespace::MathMl,
+        Some(other) => {
+            return Err(host_error(format!(
+                "createElementNS: unsupported namespace {other}"
+            )));
+        }
+    };
+    let id = document()?
+        .borrow_mut()
+        .create_element_ns(&qualified, namespace, Vec::new());
+    wrap_node(id, context)
+}
+
+fn js_create_document_fragment(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let _root = node_of(this, context)?;
+    let id = document()?.borrow_mut().create_document_fragment();
     wrap_node(id, context)
 }
 
@@ -1570,36 +2431,41 @@ fn inline_declaration(node: NodeId, context: &mut Context) -> Vec<crate::engine:
 }
 
 fn style_get(node: NodeId, name: &str, context: &mut Context) -> JsResult<JsValue> {
+    let name = normalize_css_property(name);
     let declarations = inline_declaration(node, context);
     let value = declarations
         .iter()
-        .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(&name))
         .map(|declaration| serialize_components(&declaration.value))
         .unwrap_or_default();
     Ok(js_string_value(&value))
 }
 
-fn style_set(node: NodeId, name: &str, value: &str, context: &mut Context) -> JsResult<()> {
+fn style_set(
+    node: NodeId,
+    name: &str,
+    value: &str,
+    important: bool,
+    context: &mut Context,
+) -> JsResult<()> {
+    let name = normalize_css_property(name);
     let mut declarations = inline_declaration(node, context);
+    let parsed_value = parse_declaration_list(&format!("x: {value};"))
+        .into_iter()
+        .next()
+        .map(|declaration| declaration.value)
+        .unwrap_or_else(|| vec![ComponentValue::Ident(value.to_owned())]);
     if let Some(declaration) = declarations
         .iter_mut()
-        .find(|declaration| declaration.name.eq_ignore_ascii_case(name))
+        .find(|declaration| declaration.name.eq_ignore_ascii_case(&name))
     {
-        declaration.value = parse_declaration_list(&format!("x: {value};"))
-            .into_iter()
-            .next()
-            .map(|declaration| declaration.value)
-            .unwrap_or_else(|| vec![ComponentValue::Ident(value.to_owned())]);
+        declaration.value = parsed_value;
+        declaration.important = important;
     } else {
-        let parsed = parse_declaration_list(&format!("x: {value};"))
-            .into_iter()
-            .next();
         declarations.push(crate::engine::css::Declaration {
-            name: name.to_owned(),
-            value: parsed
-                .map(|declaration| declaration.value)
-                .unwrap_or_else(|| vec![ComponentValue::Ident(value.to_owned())]),
-            important: false,
+            name,
+            value: parsed_value,
+            important,
         });
     }
     let css = serialize_declarations(&declarations);
@@ -1630,7 +2496,10 @@ fn style_set_property(
         return Ok(JsValue::undefined());
     };
     let value = string_arg(args, 1, context).unwrap_or_default();
-    style_set(node, &name, &value, context)?;
+    let priority = string_arg(args, 2, context)
+        .map(|value| value.eq_ignore_ascii_case("important"))
+        .unwrap_or(false);
+    style_set(node, &name, &value, priority, context)?;
     Ok(JsValue::undefined())
 }
 
@@ -1643,12 +2512,30 @@ fn style_remove_property(
     let Some(name) = string_arg(args, 0, context) else {
         return Ok(JsValue::undefined());
     };
+    let name = normalize_css_property(&name);
     let mut declarations = inline_declaration(node, context);
     declarations.retain(|declaration| !declaration.name.eq_ignore_ascii_case(&name));
     let css = serialize_declarations(&declarations);
     let _ = document()?.borrow_mut().set_attribute(node, "style", &css);
     observers::record_attribute(node, "style");
     Ok(JsValue::undefined())
+}
+
+fn style_get_length(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    Ok(JsValue::from(inline_declaration(node, context).len() as f64))
+}
+
+fn style_item(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    let Some(index) = item_index(args, context) else {
+        return Ok(js_string_value(""));
+    };
+    let declarations = inline_declaration(node, context);
+    Ok(declarations
+        .get(index)
+        .map(|declaration| js_string_value(&declaration.name))
+        .unwrap_or_else(|| js_string_value("")))
 }
 
 fn style_get_css_text(
@@ -1691,7 +2578,7 @@ macro_rules! style_accessor {
             fn $setter(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
                 let node = node_of(this, context)?;
                 let value = string_arg(args, 0, context).unwrap_or_default();
-                style_set(node, $css_name, &value, context)?;
+                style_set(node, $css_name, &value, false, context)?;
                 Ok(JsValue::undefined())
             }
         )*
@@ -1735,6 +2622,83 @@ style_accessor!(
     get_style_align_items, set_style_align_items, "align-items";
     get_style_gap, set_style_gap, "gap";
     get_style_transform, set_style_transform, "transform";
+);
+
+// Additional common CSS properties. Kept in a separate invocation so the
+// original accessor set stays readable while `style` now covers the properties
+// scripts most frequently read and write.
+style_accessor!(
+    get_style_background, set_style_background, "background";
+    get_style_background_repeat, set_style_background_repeat, "background-repeat";
+    get_style_background_position, set_style_background_position, "background-position";
+    get_style_background_size, set_style_background_size, "background-size";
+    get_style_background_attachment, set_style_background_attachment, "background-attachment";
+    get_style_border_width, set_style_border_width, "border-width";
+    get_style_border_style, set_style_border_style, "border-style";
+    get_style_border_top, set_style_border_top, "border-top";
+    get_style_border_right, set_style_border_right, "border-right";
+    get_style_border_bottom, set_style_border_bottom, "border-bottom";
+    get_style_border_left, set_style_border_left, "border-left";
+    get_style_border_top_width, set_style_border_top_width, "border-top-width";
+    get_style_border_right_width, set_style_border_right_width, "border-right-width";
+    get_style_border_bottom_width, set_style_border_bottom_width, "border-bottom-width";
+    get_style_border_left_width, set_style_border_left_width, "border-left-width";
+    get_style_border_top_color, set_style_border_top_color, "border-top-color";
+    get_style_border_right_color, set_style_border_right_color, "border-right-color";
+    get_style_border_bottom_color, set_style_border_bottom_color, "border-bottom-color";
+    get_style_border_left_color, set_style_border_left_color, "border-left-color";
+    get_style_box_shadow, set_style_box_shadow, "box-shadow";
+    get_style_text_shadow, set_style_text_shadow, "text-shadow";
+    get_style_outline, set_style_outline, "outline";
+    get_style_outline_color, set_style_outline_color, "outline-color";
+    get_style_outline_style, set_style_outline_style, "outline-style";
+    get_style_outline_width, set_style_outline_width, "outline-width";
+    get_style_z_index, set_style_z_index, "z-index";
+    get_style_overflow, set_style_overflow, "overflow";
+    get_style_overflow_x, set_style_overflow_x, "overflow-x";
+    get_style_overflow_y, set_style_overflow_y, "overflow-y";
+    get_style_visibility, set_style_visibility, "visibility";
+    get_style_cursor, set_style_cursor, "cursor";
+    get_style_css_float, set_style_css_float, "float";
+    get_style_clear, set_style_clear, "clear";
+    get_style_box_sizing, set_style_box_sizing, "box-sizing";
+    get_style_min_width, set_style_min_width, "min-width";
+    get_style_max_width, set_style_max_width, "max-width";
+    get_style_min_height, set_style_min_height, "min-height";
+    get_style_max_height, set_style_max_height, "max-height";
+    get_style_text_decoration, set_style_text_decoration, "text-decoration";
+    get_style_text_transform, set_style_text_transform, "text-transform";
+    get_style_text_indent, set_style_text_indent, "text-indent";
+    get_style_text_overflow, set_style_text_overflow, "text-overflow";
+    get_style_white_space, set_style_white_space, "white-space";
+    get_style_word_break, set_style_word_break, "word-break";
+    get_style_word_wrap, set_style_word_wrap, "word-wrap";
+    get_style_letter_spacing, set_style_letter_spacing, "letter-spacing";
+    get_style_word_spacing, set_style_word_spacing, "word-spacing";
+    get_style_vertical_align, set_style_vertical_align, "vertical-align";
+    get_style_list_style, set_style_list_style, "list-style";
+    get_style_list_style_type, set_style_list_style_type, "list-style-type";
+    get_style_flex, set_style_flex, "flex";
+    get_style_flex_grow, set_style_flex_grow, "flex-grow";
+    get_style_flex_shrink, set_style_flex_shrink, "flex-shrink";
+    get_style_flex_basis, set_style_flex_basis, "flex-basis";
+    get_style_flex_wrap, set_style_flex_wrap, "flex-wrap";
+    get_style_align_content, set_style_align_content, "align-content";
+    get_style_align_self, set_style_align_self, "align-self";
+    get_style_order, set_style_order, "order";
+    get_style_row_gap, set_style_row_gap, "row-gap";
+    get_style_column_gap, set_style_column_gap, "column-gap";
+    get_style_grid_template_columns, set_style_grid_template_columns, "grid-template-columns";
+    get_style_grid_template_rows, set_style_grid_template_rows, "grid-template-rows";
+    get_style_transform_origin, set_style_transform_origin, "transform-origin";
+    get_style_transition, set_style_transition, "transition";
+    get_style_animation, set_style_animation, "animation";
+    get_style_object_fit, set_style_object_fit, "object-fit";
+    get_style_user_select, set_style_user_select, "user-select";
+    get_style_pointer_events, set_style_pointer_events, "pointer-events";
+    get_style_border_collapse, set_style_border_collapse, "border-collapse";
+    get_style_border_spacing, set_style_border_spacing, "border-spacing";
+    get_style_caption_side, set_style_caption_side, "caption-side";
 );
 
 fn build_style_object(node: NodeId, context: &mut Context) -> JsResult<JsObject> {
@@ -1851,7 +2815,14 @@ fn build_style_object(node: NodeId, context: &mut Context) -> JsResult<JsObject>
         ),
     ];
     let css_text = accessor(style_get_css_text, style_set_css_text);
+    let length = NativeFunction::from_fn_ptr(style_get_length).to_js_function(&realm);
     let mut object = ObjectInitializer::new(context);
+    object.accessor(
+        JsString::from("length"),
+        Some(length),
+        None,
+        Attribute::all(),
+    );
     object.accessor(
         JsString::from("cssText"),
         Some(css_text.0),
@@ -1859,6 +2830,277 @@ fn build_style_object(node: NodeId, context: &mut Context) -> JsResult<JsObject>
         Attribute::all(),
     );
     for (name, (get, set)) in entries {
+        object.accessor(JsString::from(name), Some(get), Some(set), Attribute::all());
+    }
+    let extra_entries = [
+        (
+            "background",
+            accessor(get_style_background, set_style_background),
+        ),
+        (
+            "backgroundRepeat",
+            accessor(get_style_background_repeat, set_style_background_repeat),
+        ),
+        (
+            "backgroundPosition",
+            accessor(get_style_background_position, set_style_background_position),
+        ),
+        (
+            "backgroundSize",
+            accessor(get_style_background_size, set_style_background_size),
+        ),
+        (
+            "backgroundAttachment",
+            accessor(
+                get_style_background_attachment,
+                set_style_background_attachment,
+            ),
+        ),
+        (
+            "borderWidth",
+            accessor(get_style_border_width, set_style_border_width),
+        ),
+        (
+            "borderStyle",
+            accessor(get_style_border_style, set_style_border_style),
+        ),
+        (
+            "borderTop",
+            accessor(get_style_border_top, set_style_border_top),
+        ),
+        (
+            "borderRight",
+            accessor(get_style_border_right, set_style_border_right),
+        ),
+        (
+            "borderBottom",
+            accessor(get_style_border_bottom, set_style_border_bottom),
+        ),
+        (
+            "borderLeft",
+            accessor(get_style_border_left, set_style_border_left),
+        ),
+        (
+            "borderTopWidth",
+            accessor(get_style_border_top_width, set_style_border_top_width),
+        ),
+        (
+            "borderRightWidth",
+            accessor(get_style_border_right_width, set_style_border_right_width),
+        ),
+        (
+            "borderBottomWidth",
+            accessor(get_style_border_bottom_width, set_style_border_bottom_width),
+        ),
+        (
+            "borderLeftWidth",
+            accessor(get_style_border_left_width, set_style_border_left_width),
+        ),
+        (
+            "borderTopColor",
+            accessor(get_style_border_top_color, set_style_border_top_color),
+        ),
+        (
+            "borderRightColor",
+            accessor(get_style_border_right_color, set_style_border_right_color),
+        ),
+        (
+            "borderBottomColor",
+            accessor(get_style_border_bottom_color, set_style_border_bottom_color),
+        ),
+        (
+            "borderLeftColor",
+            accessor(get_style_border_left_color, set_style_border_left_color),
+        ),
+        (
+            "boxShadow",
+            accessor(get_style_box_shadow, set_style_box_shadow),
+        ),
+        (
+            "textShadow",
+            accessor(get_style_text_shadow, set_style_text_shadow),
+        ),
+        ("outline", accessor(get_style_outline, set_style_outline)),
+        (
+            "outlineColor",
+            accessor(get_style_outline_color, set_style_outline_color),
+        ),
+        (
+            "outlineStyle",
+            accessor(get_style_outline_style, set_style_outline_style),
+        ),
+        (
+            "outlineWidth",
+            accessor(get_style_outline_width, set_style_outline_width),
+        ),
+        ("zIndex", accessor(get_style_z_index, set_style_z_index)),
+        ("overflow", accessor(get_style_overflow, set_style_overflow)),
+        (
+            "overflowX",
+            accessor(get_style_overflow_x, set_style_overflow_x),
+        ),
+        (
+            "overflowY",
+            accessor(get_style_overflow_y, set_style_overflow_y),
+        ),
+        (
+            "visibility",
+            accessor(get_style_visibility, set_style_visibility),
+        ),
+        ("cursor", accessor(get_style_cursor, set_style_cursor)),
+        (
+            "cssFloat",
+            accessor(get_style_css_float, set_style_css_float),
+        ),
+        ("clear", accessor(get_style_clear, set_style_clear)),
+        (
+            "boxSizing",
+            accessor(get_style_box_sizing, set_style_box_sizing),
+        ),
+        (
+            "minWidth",
+            accessor(get_style_min_width, set_style_min_width),
+        ),
+        (
+            "maxWidth",
+            accessor(get_style_max_width, set_style_max_width),
+        ),
+        (
+            "minHeight",
+            accessor(get_style_min_height, set_style_min_height),
+        ),
+        (
+            "maxHeight",
+            accessor(get_style_max_height, set_style_max_height),
+        ),
+        (
+            "textDecoration",
+            accessor(get_style_text_decoration, set_style_text_decoration),
+        ),
+        (
+            "textTransform",
+            accessor(get_style_text_transform, set_style_text_transform),
+        ),
+        (
+            "textIndent",
+            accessor(get_style_text_indent, set_style_text_indent),
+        ),
+        (
+            "textOverflow",
+            accessor(get_style_text_overflow, set_style_text_overflow),
+        ),
+        (
+            "whiteSpace",
+            accessor(get_style_white_space, set_style_white_space),
+        ),
+        (
+            "wordBreak",
+            accessor(get_style_word_break, set_style_word_break),
+        ),
+        (
+            "wordWrap",
+            accessor(get_style_word_wrap, set_style_word_wrap),
+        ),
+        (
+            "letterSpacing",
+            accessor(get_style_letter_spacing, set_style_letter_spacing),
+        ),
+        (
+            "wordSpacing",
+            accessor(get_style_word_spacing, set_style_word_spacing),
+        ),
+        (
+            "verticalAlign",
+            accessor(get_style_vertical_align, set_style_vertical_align),
+        ),
+        (
+            "listStyle",
+            accessor(get_style_list_style, set_style_list_style),
+        ),
+        (
+            "listStyleType",
+            accessor(get_style_list_style_type, set_style_list_style_type),
+        ),
+        ("flex", accessor(get_style_flex, set_style_flex)),
+        (
+            "flexGrow",
+            accessor(get_style_flex_grow, set_style_flex_grow),
+        ),
+        (
+            "flexShrink",
+            accessor(get_style_flex_shrink, set_style_flex_shrink),
+        ),
+        (
+            "flexBasis",
+            accessor(get_style_flex_basis, set_style_flex_basis),
+        ),
+        (
+            "flexWrap",
+            accessor(get_style_flex_wrap, set_style_flex_wrap),
+        ),
+        (
+            "alignContent",
+            accessor(get_style_align_content, set_style_align_content),
+        ),
+        (
+            "alignSelf",
+            accessor(get_style_align_self, set_style_align_self),
+        ),
+        ("order", accessor(get_style_order, set_style_order)),
+        ("rowGap", accessor(get_style_row_gap, set_style_row_gap)),
+        (
+            "columnGap",
+            accessor(get_style_column_gap, set_style_column_gap),
+        ),
+        (
+            "gridTemplateColumns",
+            accessor(
+                get_style_grid_template_columns,
+                set_style_grid_template_columns,
+            ),
+        ),
+        (
+            "gridTemplateRows",
+            accessor(get_style_grid_template_rows, set_style_grid_template_rows),
+        ),
+        (
+            "transformOrigin",
+            accessor(get_style_transform_origin, set_style_transform_origin),
+        ),
+        (
+            "transition",
+            accessor(get_style_transition, set_style_transition),
+        ),
+        (
+            "animation",
+            accessor(get_style_animation, set_style_animation),
+        ),
+        (
+            "objectFit",
+            accessor(get_style_object_fit, set_style_object_fit),
+        ),
+        (
+            "userSelect",
+            accessor(get_style_user_select, set_style_user_select),
+        ),
+        (
+            "pointerEvents",
+            accessor(get_style_pointer_events, set_style_pointer_events),
+        ),
+        (
+            "borderCollapse",
+            accessor(get_style_border_collapse, set_style_border_collapse),
+        ),
+        (
+            "borderSpacing",
+            accessor(get_style_border_spacing, set_style_border_spacing),
+        ),
+        (
+            "captionSide",
+            accessor(get_style_caption_side, set_style_caption_side),
+        ),
+    ];
+    for (name, (get, set)) in extra_entries {
         object.accessor(JsString::from(name), Some(get), Some(set), Attribute::all());
     }
     for (name, function) in [
@@ -1874,6 +3116,11 @@ fn build_style_object(node: NodeId, context: &mut Context) -> JsResult<JsObject>
             "removeProperty",
             NativeFunction::from_fn_ptr(style_remove_property),
         ),
+        (
+            "getPropertyPriority",
+            NativeFunction::from_fn_ptr(js_style_get_priority),
+        ),
+        ("item", NativeFunction::from_fn_ptr(style_item)),
     ] {
         object.property(
             JsString::from(name),
@@ -1980,6 +3227,258 @@ fn build_class_list(node: NodeId, context: &mut Context) -> JsResult<JsObject> {
         context,
     )?;
     Ok(class_list)
+}
+
+fn dataset_attribute_name(key: &str) -> String {
+    let mut name = String::from("data-");
+    for character in key.chars() {
+        if character.is_ascii_uppercase() {
+            name.push('-');
+            name.push(character.to_ascii_lowercase());
+        } else {
+            name.push(character);
+        }
+    }
+    name
+}
+
+fn dataset_property_name(attribute: &str) -> Option<String> {
+    let rest = if attribute.len() >= 5 && attribute[..5].eq_ignore_ascii_case("data-") {
+        &attribute[5..]
+    } else {
+        return None;
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let mut name = String::with_capacity(rest.len());
+    let mut upper = false;
+    for character in rest.chars() {
+        if upper {
+            name.push(character.to_ascii_uppercase());
+            upper = false;
+        } else if character == '-' {
+            upper = true;
+        } else {
+            name.push(character);
+        }
+    }
+    Some(name)
+}
+
+fn dataset_key(args: &[JsValue]) -> Option<String> {
+    args.get(1)
+        .and_then(JsValue::as_string)
+        .map(|key| key.to_std_string_escaped())
+}
+
+fn dataset_node(args: &[JsValue], context: &mut Context) -> Option<NodeId> {
+    args.first()
+        .and_then(JsValue::as_object)
+        .and_then(|target| node_id_from_object(&target, context))
+}
+
+fn js_dataset_get(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let _ = this;
+    let Some(key) = dataset_key(args) else {
+        return Ok(JsValue::undefined());
+    };
+    if key == super::NODE_ID_KEY {
+        let Some(target) = args.first().and_then(JsValue::as_object) else {
+            return Ok(JsValue::undefined());
+        };
+        return target.get(JsString::from(super::NODE_ID_KEY), context);
+    }
+    let Some(node) = dataset_node(args, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let attribute = dataset_attribute_name(&key);
+    let value = {
+        let document = document()?;
+        let document = document.borrow();
+        document.get_attribute(node, &attribute).map(str::to_owned)
+    };
+    Ok(value
+        .map(|value| js_string_value(&value))
+        .unwrap_or(JsValue::undefined()))
+}
+
+fn js_dataset_set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let _ = this;
+    let Some(key) = dataset_key(args) else {
+        return Ok(JsValue::from(true));
+    };
+    if key == super::NODE_ID_KEY {
+        return Ok(JsValue::from(true));
+    }
+    let Some(node) = dataset_node(args, context) else {
+        return Ok(JsValue::from(false));
+    };
+    let value = args
+        .get(2)
+        .map(|value| value_to_display(value, context))
+        .unwrap_or_default();
+    let attribute = dataset_attribute_name(&key);
+    document()?
+        .borrow_mut()
+        .set_attribute(node, &attribute, &value)
+        .map_err(|error| host_error(error.to_string()))?;
+    observers::record_attribute(node, &attribute);
+    Ok(JsValue::from(true))
+}
+
+fn js_dataset_has(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let _ = this;
+    let Some(key) = dataset_key(args) else {
+        return Ok(JsValue::from(false));
+    };
+    if key == super::NODE_ID_KEY {
+        return Ok(JsValue::from(true));
+    }
+    let Some(node) = dataset_node(args, context) else {
+        return Ok(JsValue::from(false));
+    };
+    let attribute = dataset_attribute_name(&key);
+    let present = {
+        let document = document()?;
+        let document = document.borrow();
+        document.get_attribute(node, &attribute).is_some()
+    };
+    Ok(JsValue::from(present))
+}
+
+fn js_dataset_delete(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let _ = this;
+    let Some(key) = dataset_key(args) else {
+        return Ok(JsValue::from(true));
+    };
+    if key == super::NODE_ID_KEY {
+        return Ok(JsValue::from(false));
+    }
+    let Some(node) = dataset_node(args, context) else {
+        return Ok(JsValue::from(false));
+    };
+    let attribute = dataset_attribute_name(&key);
+    let _ = document()?.borrow_mut().remove_attribute(node, &attribute);
+    observers::record_attribute(node, &attribute);
+    Ok(JsValue::from(true))
+}
+
+fn js_dataset_own_keys(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let array = JsArray::new(context)?;
+    array.push(js_string_value(super::NODE_ID_KEY), context)?;
+    if let Some(node) = dataset_node(args, context) {
+        let keys: Vec<String> = {
+            let document = document()?;
+            let document = document.borrow();
+            document
+                .element(node)
+                .map(|element| {
+                    element
+                        .attributes
+                        .iter()
+                        .filter_map(|attribute| dataset_property_name(&attribute.name))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for key in keys {
+            array.push(js_string_value(&key), context)?;
+        }
+    }
+    Ok(JsValue::from(array))
+}
+
+fn descriptor_object(
+    value: JsValue,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+    context: &mut Context,
+) -> JsValue {
+    let mut descriptor = ObjectInitializer::new(context);
+    descriptor
+        .property(JsString::from("value"), value, Attribute::all())
+        .property(
+            JsString::from("writable"),
+            JsValue::from(writable),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("enumerable"),
+            JsValue::from(enumerable),
+            Attribute::all(),
+        )
+        .property(
+            JsString::from("configurable"),
+            JsValue::from(configurable),
+            Attribute::all(),
+        );
+    JsValue::from(descriptor.build())
+}
+
+fn js_dataset_get_own_property_descriptor(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(key) = dataset_key(args) else {
+        return Ok(JsValue::undefined());
+    };
+    if key == super::NODE_ID_KEY {
+        let Some(target) = args.first().and_then(JsValue::as_object) else {
+            return Ok(JsValue::undefined());
+        };
+        let value = target.get(JsString::from(super::NODE_ID_KEY), context)?;
+        return Ok(descriptor_object(value, false, false, false, context));
+    }
+    let Some(node) = dataset_node(args, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let attribute = dataset_attribute_name(&key);
+    let value = {
+        let document = document()?;
+        let document = document.borrow();
+        document.get_attribute(node, &attribute).map(str::to_owned)
+    };
+    let Some(value) = value else {
+        return Ok(JsValue::undefined());
+    };
+    Ok(descriptor_object(
+        js_string_value(&value),
+        true,
+        true,
+        true,
+        context,
+    ))
+}
+
+fn build_dataset(node: NodeId, context: &mut Context) -> JsResult<JsObject> {
+    let mut target = ObjectInitializer::new(context);
+    target.property(
+        JsString::from(super::NODE_ID_KEY),
+        JsValue::from(node.index() as f64),
+        Attribute::empty(),
+    );
+    let target = target.build();
+    let proxy = JsProxy::builder(target)
+        .get(js_dataset_get)
+        .set(js_dataset_set)
+        .has(js_dataset_has)
+        .delete_property(js_dataset_delete)
+        .own_keys(js_dataset_own_keys)
+        .get_own_property_descriptor(js_dataset_get_own_property_descriptor)
+        .build(context)?;
+    Ok(proxy.into())
+}
+
+fn get_dataset(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node = node_of(this, context)?;
+    Ok(JsValue::from(build_dataset(node, context)?))
 }
 
 pub(crate) fn js_document_write(

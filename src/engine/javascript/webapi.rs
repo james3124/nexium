@@ -1,6 +1,7 @@
 //! Web platform APIs: URL, text encoders, Blob/File/FormData, storage,
 //! history, performance, screen and fetch request helpers.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -17,6 +18,10 @@ use super::{host_error, js_string_value, string_arg, value_to_display, with_stat
 
 pub(crate) const HEADERS_KEY: &str = "__nexium_headers";
 pub(crate) const REQUEST_KEY: &str = "__nexium_request";
+pub(crate) const FORM_DATA_KEY: &str = "__nexium_form_data";
+
+/// Monotonic counter used to give each multipart body a unique boundary.
+static MULTIPART_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn install_globals(context: &mut Context, options: &ScriptOptions) -> JsResult<()> {
     install_constructor(context, "URL", js_url_construct, 1)?;
@@ -643,13 +648,17 @@ fn js_text_decode(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
 // ---------------------------------------------------------------------------
 
 fn blob_bytes(value: &JsValue, context: &mut Context) -> Vec<u8> {
-    if let Some(bytes) = typed_array_bytes(value, context) {
-        return bytes;
-    }
+    // Blob/File objects keep their payload under `__nexium_bytes`; check that
+    // first because the generic array reader would otherwise see an object
+    // without a `length` and incorrectly return an empty vector.
     if let Some(object) = value.as_object()
         && let Ok(hidden) = object.get(JsString::from("__nexium_bytes"), context)
+        && !hidden.is_undefined()
         && let Some(bytes) = typed_array_bytes(&hidden, context)
     {
+        return bytes;
+    }
+    if let Some(bytes) = typed_array_bytes(value, context) {
         return bytes;
     }
     value_to_display(value, context).into_bytes()
@@ -724,9 +733,10 @@ fn js_file_construct(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let name = string_arg(args, 0, context).unwrap_or_default();
+    // File(bits, name, options) — `bits` is the first argument, `name` the
+    // second (the previous implementation had them swapped).
     let mut bytes = Vec::new();
-    if let Some(parts) = args.get(1).and_then(JsValue::as_object)
+    if let Some(parts) = args.first().and_then(JsValue::as_object)
         && let Ok(array) = JsArray::from_object(parts.clone())
     {
         let length = array.length(context)?;
@@ -735,6 +745,7 @@ fn js_file_construct(
             bytes.extend(blob_bytes(&part, context));
         }
     }
+    let name = string_arg(args, 1, context).unwrap_or_default();
     let mut content_type = String::new();
     let mut last_modified = 0.0;
     if let Some(options) = args.get(2).and_then(JsValue::as_object) {
@@ -826,11 +837,17 @@ fn js_form_data_construct(
     let realm = context.realm().clone();
     let entries = JsArray::new(context)?;
     let mut object = ObjectInitializer::new(context);
-    object.property(
-        JsString::from("__nexium_entries"),
-        JsValue::from(entries),
-        Attribute::WRITABLE,
-    );
+    object
+        .property(
+            JsString::from(FORM_DATA_KEY),
+            JsValue::from(true),
+            Attribute::empty(),
+        )
+        .property(
+            JsString::from("__nexium_entries"),
+            JsValue::from(entries),
+            Attribute::WRITABLE,
+        );
     for (name, function) in [
         ("append", NativeFunction::from_fn_ptr(js_form_append)),
         ("set", NativeFunction::from_fn_ptr(js_form_set)),
@@ -986,6 +1003,90 @@ fn js_form_delete(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
 fn js_form_entries(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let entries = form_entries(this, context)?;
     Ok(JsValue::from(entries))
+}
+
+/// Whether a JS value is one of our `FormData` objects.
+pub(crate) fn is_form_data(value: &JsValue, context: &mut Context) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object
+        .get(JsString::from(FORM_DATA_KEY), context)
+        .ok()
+        .and_then(|value| value.as_boolean())
+        .unwrap_or(false)
+}
+
+fn escape_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Serialize a `FormData` object into a `multipart/form-data` request body and
+/// return it together with the matching `Content-Type` header (including the
+/// generated boundary). String entries become plain fields; `Blob`/`File`
+/// entries become file parts with `filename` and `Content-Type` metadata.
+pub(crate) fn form_data_multipart(
+    value: &JsValue,
+    context: &mut Context,
+) -> Option<(Vec<u8>, String)> {
+    if !is_form_data(value, context) {
+        return None;
+    }
+    let entries = form_entries(value, context).ok()?;
+    let length = entries.length(context).ok()?;
+    let counter = MULTIPART_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let boundary = format!("----NexiumFormBoundary{}-{counter}", std::process::id());
+    let mut body: Vec<u8> = Vec::new();
+    for index in 0..length {
+        let pair = entries.get(index, context).ok()?;
+        let pair = pair.as_object()?;
+        let name = pair
+            .get(0, context)
+            .ok()
+            .map(|value| value_to_display(&value, context))
+            .unwrap_or_default();
+        let entry = pair.get(1, context).ok()?;
+        let is_blob = entry.as_object().is_some_and(|object| {
+            object
+                .has_own_property(JsString::from("__nexium_bytes"), context)
+                .unwrap_or(false)
+        });
+        let mut disposition = format!(
+            "Content-Disposition: form-data; name=\"{}\"",
+            escape_quoted(&name)
+        );
+        let mut part_type: Option<String> = None;
+        let bytes = if is_blob {
+            let object = entry.as_object()?;
+            let filename = object
+                .get(JsString::from("name"), context)
+                .ok()
+                .filter(|value| !value.is_null_or_undefined())
+                .map(|value| value_to_display(&value, context))
+                .unwrap_or_else(|| "blob".to_owned());
+            disposition.push_str(&format!("; filename=\"{}\"", escape_quoted(&filename)));
+            part_type = object
+                .get(JsString::from("type"), context)
+                .ok()
+                .map(|value| value_to_display(&value, context))
+                .filter(|value| !value.is_empty());
+            blob_bytes(&entry, context)
+        } else {
+            value_to_display(&entry, context).into_bytes()
+        };
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(disposition.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        if let Some(part_type) = part_type {
+            body.extend_from_slice(format!("Content-Type: {part_type}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(&bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    Some((body, content_type))
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,15 +1253,19 @@ fn js_request_construct(
 ) -> JsResult<JsValue> {
     let url = string_arg(args, 0, context).unwrap_or_default();
     let mut method = "GET".to_owned();
-    let mut body = String::new();
+    let mut body = js_string_value("");
     let mut headers_map: Option<JsValue> = None;
     let mut signal: Option<JsValue> = None;
     if let Some(init) = args.get(1).and_then(JsValue::as_object) {
         if let Ok(value) = init.get(JsString::from("method"), context) {
             method = value_to_display(&value, context);
         }
-        if let Ok(value) = init.get(JsString::from("body"), context) {
-            body = value_to_display(&value, context);
+        if let Ok(value) = init.get(JsString::from("body"), context)
+            && !value.is_null_or_undefined()
+        {
+            // Keep the original value so fetch can recognize FormData/Blob
+            // bodies and build a multipart request from them.
+            body = value;
         }
         if let Ok(headers) = init.get(JsString::from("headers"), context) {
             let built = js_headers_construct(&JsValue::undefined(), &[headers], context)?;
@@ -1193,11 +1298,7 @@ fn js_request_construct(
             js_string_value(&method),
             Attribute::empty(),
         )
-        .property(
-            JsString::from("__nexium_body"),
-            js_string_value(&body),
-            Attribute::empty(),
-        );
+        .property(JsString::from("__nexium_body"), body, Attribute::empty());
     if let Some(map) = headers_map {
         object.property(JsString::from(HEADERS_KEY), map, Attribute::empty());
     }

@@ -887,6 +887,7 @@ async fn dispatch(
                         y: Some(y),
                         selector: None,
                         button: Some(button.to_owned()),
+                        session_id: None,
                     };
                     service
                         .click(auth, Some(target), options)
@@ -898,6 +899,7 @@ async fn dispatch(
                         x: Some(x),
                         y: Some(y),
                         selector: None,
+                        session_id: None,
                     };
                     service
                         .hover(auth, Some(target), options)
@@ -920,6 +922,7 @@ async fn dispatch(
                     let options = TypeOptions {
                         text: text.to_owned(),
                         selector: None,
+                        session_id: None,
                     };
                     service
                         .type_text(auth, Some(target), options)
@@ -932,6 +935,7 @@ async fn dispatch(
                 {
                     let options = PressOptions {
                         key: key.to_owned(),
+                        session_id: None,
                     };
                     service
                         .press(auth, Some(target), options)
@@ -950,6 +954,7 @@ async fn dispatch(
             let options = TypeOptions {
                 text,
                 selector: None,
+                session_id: None,
             };
             service
                 .type_text(auth, Some(target), options)
@@ -1009,11 +1014,26 @@ async fn dispatch(
                 .get("quality")
                 .and_then(Value::as_u64)
                 .map(|quality| quality.min(100) as u8);
+            let clip = params.get("clip").and_then(Value::as_object).map(|clip| {
+                let number = |key: &str| clip.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+                crate::api::service::ScreenshotClip {
+                    x: number("x") as f32,
+                    y: number("y") as f32,
+                    width: number("width") as f32,
+                    height: number("height") as f32,
+                    scale: clip
+                        .get("scale")
+                        .and_then(Value::as_f64)
+                        .map(|scale| scale as f32),
+                }
+            });
             let options = ScreenshotOptions {
                 format: Some(format),
                 quality,
                 full_page: params.get("captureBeyondViewport").and_then(Value::as_bool),
-                element: None,
+                clip,
+                clip_origin: Some("document".to_owned()),
+                ..Default::default()
             };
             let data = service
                 .screenshot(auth, Some(target), options)
@@ -1038,7 +1058,14 @@ async fn dispatch(
                 .unwrap_or(720.0);
             let script = "Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, innerHeight)".to_owned();
             let content_height = match service
-                .evaluate(auth, Some(target), EvaluateOptions { script })
+                .evaluate(
+                    auth,
+                    Some(target),
+                    EvaluateOptions {
+                        script,
+                        session_id: None,
+                    },
+                )
                 .await
             {
                 Ok(value) => value
@@ -1098,7 +1125,14 @@ async fn dispatch(
                 return Err((-32602, "expression must not be empty".to_owned()));
             }
             let value = service
-                .evaluate(auth, Some(target), EvaluateOptions { script: expression })
+                .evaluate(
+                    auth,
+                    Some(target),
+                    EvaluateOptions {
+                        script: expression,
+                        session_id: None,
+                    },
+                )
                 .await
                 .map_err(cdp_error)?;
             let result = value.get("result").cloned().unwrap_or(Value::Null);
@@ -1131,7 +1165,14 @@ async fn dispatch(
                 format!("({declaration})()")
             };
             let value = service
-                .evaluate(auth, Some(target), EvaluateOptions { script })
+                .evaluate(
+                    auth,
+                    Some(target),
+                    EvaluateOptions {
+                        script,
+                        session_id: None,
+                    },
+                )
                 .await
                 .map_err(cdp_error)?;
             let result = value.get("result").cloned().unwrap_or(Value::Null);

@@ -12,7 +12,7 @@ USAGE:
     nexium <url> [OPTIONS]
 
 OPTIONS:
-    --screenshot <path>     Render and save a screenshot (png/jpeg by extension)
+    --screenshot <path>     Render and save a screenshot (png/jpeg/webp by extension)
     --viewport <WxH>        Rendering viewport (default 1280x720)
     --viewport-shot         Crop the screenshot to the viewport (default: full page)
     --element <selector>    Screenshot only the first matching element
@@ -248,7 +248,13 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.mcp {
+        let restore_sessions = config.api_session_persistence_enabled;
         let service = nexium::ApiService::new(config);
+        if restore_sessions {
+            if let Err(error) = service.restore_persisted_sessions(None).await {
+                eprintln!("nexium: could not restore persisted sessions: {error}");
+            }
+        }
         nexium::mcp::run_stdio(service).await?;
         return Ok(());
     }
@@ -399,23 +405,6 @@ fn save_screenshot(
     image: &image::RgbaImage,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "jpg" | "jpeg") {
-        let rgb = image::DynamicImage::ImageRgba8(image.clone()).to_rgb8();
-        let file = std::fs::File::create(path)?;
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, 90);
-        encoder.encode(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )?;
-    } else {
-        image.save(path)?;
-    }
+    nexium::rendering::save_image(image, path)?;
     Ok(())
 }

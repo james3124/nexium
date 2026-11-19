@@ -1,11 +1,13 @@
 //! Shared control-plane service used by REST, WebSocket and MCP transports.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use image::codecs::png::{CompressionType, FilterType};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -17,7 +19,8 @@ use crate::browser::{Browser, TabId};
 use crate::engine::dom::{Document, NodeData, NodeId};
 use crate::interaction::MouseButton;
 use crate::networking::NetworkEvent;
-use crate::rendering::RenderOptions;
+use crate::rendering::{RenderOptions, screenshots};
+use crate::storage::{read_locked, write_atomic};
 use crate::utils::NxError;
 
 #[derive(Clone, Debug)]
@@ -94,6 +97,14 @@ impl From<NxError> for ApiError {
     }
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(Clone, Debug, Serialize)]
@@ -106,7 +117,7 @@ pub struct ServerEvent {
     pub data: Value,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ViewportOptions {
     pub width: u32,
@@ -120,6 +131,7 @@ pub struct CreateOptions {
     pub profile: Option<String>,
     pub viewport: Option<ViewportOptions>,
     pub user_agent: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -129,6 +141,7 @@ pub struct ClickOptions {
     pub y: Option<f32>,
     pub selector: Option<String>,
     pub button: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -136,12 +149,14 @@ pub struct ClickOptions {
 pub struct TypeOptions {
     pub text: String,
     pub selector: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct PressOptions {
     pub key: String,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -150,6 +165,7 @@ pub struct ScrollOptions {
     pub dx: Option<f32>,
     pub dy: Option<f32>,
     pub selector: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -158,6 +174,17 @@ pub struct HoverOptions {
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub selector: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ScreenshotClip {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub scale: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -167,36 +194,55 @@ pub struct ScreenshotOptions {
     pub quality: Option<u8>,
     pub full_page: Option<bool>,
     pub element: Option<String>,
+    pub clip: Option<ScreenshotClip>,
+    /// `"document"` (default) or `"viewport"`; controls whether clip
+    /// coordinates include the current scroll offset.
+    pub clip_origin: Option<String>,
+    pub png_compression: Option<String>,
+    pub png_filter: Option<String>,
+    /// Persist the encoded image to the configured artifacts directory and
+    /// return its path/URL in the response. `artifact_name` implies `save`.
+    pub save: Option<bool>,
+    /// Optional safe base name (no extension, no path separators) for the
+    /// persisted artifact. An auto-generated name is used when omitted.
+    #[serde(alias = "artifact")]
+    pub artifact_name: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct SnapshotOptions {
     pub include_accessibility: Option<bool>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct EvaluateOptions {
     pub script: String,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TabsCreateOptions {
     pub url: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TabsTargetOptions {
     pub tab_id: Option<u64>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct SessionOptions {
     pub name: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -205,6 +251,7 @@ pub struct WaitOptions {
     pub ms: Option<u64>,
     pub selector: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub session_id: Option<String>,
 }
 
 pub struct SessionEntry {
@@ -214,6 +261,10 @@ pub struct SessionEntry {
     pub created_ms: u64,
     pub last_used_ms: AtomicU64,
     pub browser: tokio::sync::Mutex<Browser>,
+    /// Creation-time settings, retained so a persisted session can be rebuilt
+    /// with the same viewport and user agent.
+    pub user_agent: Option<String>,
+    pub viewport: Option<ViewportOptions>,
     seen_network: Mutex<u64>,
     seen_console: Mutex<usize>,
     seen_errors: Mutex<usize>,
@@ -457,6 +508,8 @@ impl ApiService {
                 "profile {profile:?} belongs to a different agent"
             )));
         }
+        let user_agent = options.user_agent.clone();
+        let viewport = options.viewport.clone();
         let mut config = self.config.clone();
         if let Some(user_agent) = options.user_agent {
             config.user_agent = user_agent;
@@ -465,7 +518,7 @@ impl ApiService {
             Some(profile) => Browser::with_profile(config, profile)?,
             None => Browser::new(config),
         };
-        if let Some(viewport) = options.viewport
+        if let Some(viewport) = &viewport
             && viewport.width > 0
             && viewport.height > 0
         {
@@ -488,6 +541,8 @@ impl ApiService {
             created_ms: now_ms(),
             last_used_ms: AtomicU64::new(now_ms()),
             browser: tokio::sync::Mutex::new(browser),
+            user_agent,
+            viewport,
             seen_network: Mutex::new(0),
             seen_console: Mutex::new(0),
             seen_errors: Mutex::new(0),
@@ -508,6 +563,11 @@ impl ApiService {
         {
             let browser = entry.browser.lock().await;
             self.broadcast_browser_events(&entry, &browser);
+        }
+        if self.config.api_session_persistence_enabled
+            && let Err(error) = self.persist_session(&entry, "default").await
+        {
+            tracing::warn!("failed to auto-persist session {id}: {error}");
         }
         Ok(id)
     }
@@ -589,6 +649,8 @@ impl ApiService {
                 owners.remove(profile);
             }
         }
+        // A closed session must not be resurrected on the next restart.
+        self.remove_persisted_session(&entry.id);
         Ok(json!({ "session_id": entry.id, "closed": true }))
     }
 
@@ -984,7 +1046,15 @@ impl ApiService {
              el.dispatchEvent(new Event('input',{{bubbles:true}}));\
              el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}})()"
         );
-        self.evaluate(auth, id, EvaluateOptions { script }).await
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script,
+                session_id: None,
+            },
+        )
+        .await
     }
 
     pub async fn submit_element(
@@ -1001,7 +1071,15 @@ impl ApiService {
              if(!form)return false;\
              if(form.requestSubmit){{form.requestSubmit();}}else{{form.submit();}}return true;}})()"
         );
-        self.evaluate(auth, id, EvaluateOptions { script }).await
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script,
+                session_id: None,
+            },
+        )
+        .await
     }
 
     /// Clear the HTTP fresh-GET cache (CDP `Network.clearBrowserCache`).
@@ -1039,7 +1117,15 @@ impl ApiService {
             "(()=>{{const el=document.querySelector({selector});\
              if(!el)return false;el.scrollIntoView({{block:'center',inline:'center'}});return true;}})()"
         );
-        self.evaluate(auth, id, EvaluateOptions { script }).await
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script,
+                session_id: None,
+            },
+        )
+        .await
     }
 
     pub async fn element_selector(
@@ -1062,7 +1148,15 @@ impl ApiService {
         let script = format!(
             "(()=>{{const el=document.querySelector({selector});if(!el)return false;el.focus();return true;}})()"
         );
-        self.evaluate(auth, id, EvaluateOptions { script }).await
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script,
+                session_id: None,
+            },
+        )
+        .await
     }
 
     pub async fn window_rect(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<Value> {
@@ -1092,6 +1186,7 @@ impl ApiService {
                 id,
                 EvaluateOptions {
                     script: "document.cookie".to_owned(),
+                    session_id: None,
                 },
             )
             .await?;
@@ -1128,7 +1223,15 @@ impl ApiService {
             "document.cookie={};",
             serde_json::to_string(&format!("{name}={value}; path=/")).unwrap_or_default()
         );
-        self.evaluate(auth, id, EvaluateOptions { script }).await?;
+        self.evaluate(
+            auth,
+            id,
+            EvaluateOptions {
+                script,
+                session_id: None,
+            },
+        )
+        .await?;
         Ok(Value::Null)
     }
 
@@ -1141,6 +1244,7 @@ impl ApiService {
             id,
             EvaluateOptions {
                 script: script.to_owned(),
+                session_id: None,
             },
         )
         .await?;
@@ -1254,6 +1358,64 @@ impl ApiService {
         Ok(data)
     }
 
+    fn artifacts_dir(&self) -> PathBuf {
+        self.config
+            .api_artifacts_dir
+            .clone()
+            .unwrap_or_else(|| self.config.data_dir.join("artifacts"))
+    }
+
+    /// Persist an encoded screenshot under the artifacts directory and return
+    /// its absolute path and logical URL. Path traversal is rejected and the
+    /// artifact store is bounded by both per-file size and file count.
+    fn save_screenshot_artifact(
+        &self,
+        bytes: &[u8],
+        extension: &str,
+        requested_name: Option<&str>,
+        session_id: &str,
+    ) -> ApiResult<(PathBuf, String)> {
+        if bytes.len() > self.config.api_artifact_max_bytes {
+            return Err(ApiError::bad_request(format!(
+                "screenshot payload ({} bytes) exceeds artifact size limit ({} bytes)",
+                bytes.len(),
+                self.config.api_artifact_max_bytes
+            )));
+        }
+        let dir = self.artifacts_dir();
+        let mut filename = match requested_name {
+            Some(name) => validate_artifact_name(name)?,
+            None => format!(
+                "screenshot-{}-{}-{}",
+                sanitize_path_component(session_id),
+                now_ms(),
+                self.counter.fetch_add(1, Ordering::SeqCst)
+            ),
+        };
+        let suffix = format!(".{extension}");
+        if !filename.ends_with(&suffix) {
+            filename.push_str(&suffix);
+        }
+        let path = dir.join(&filename);
+        // Defence in depth: the joined path must be a direct child of the
+        // configured artifacts directory.
+        if path.parent() != Some(dir.as_path()) {
+            return Err(ApiError::bad_request("invalid artifact path"));
+        }
+        write_atomic(&path, bytes)
+            .map_err(|error| ApiError::internal(format!("write screenshot artifact: {error}")))?;
+        prune_artifacts(&dir, self.config.api_artifact_max_files);
+        let url = format!("/artifacts/{filename}");
+        Ok((path, url))
+    }
+
+    /// Read a persisted artifact by its (validated) file name.
+    pub fn read_artifact(&self, name: &str) -> ApiResult<Vec<u8>> {
+        let filename = validate_artifact_name(name)?;
+        let path = self.artifacts_dir().join(filename);
+        std::fs::read(&path).map_err(|_| ApiError::not_found(format!("artifact not found: {name}")))
+    }
+
     pub async fn screenshot(
         &self,
         auth: &AuthContext,
@@ -1267,16 +1429,45 @@ impl ApiService {
             .cloned()
             .ok_or_else(|| ApiError::bad_request("active tab has no page"))?;
         let viewport = browser.viewport();
-        let rendered = browser
-            .render(
-                &page,
-                RenderOptions {
-                    viewport,
-                    max_height: 20_000,
-                    load_images: true,
-                },
-            )
+        let (tab_scroll_x, tab_scroll_y) = browser
+            .active_tab()
+            .map(|tab| (tab.scroll_x, tab.scroll_y))
+            .unwrap_or((0.0, 0.0));
+        let full_page = options.full_page.unwrap_or(false);
+        let clip_origin = options
+            .clip_origin
+            .as_deref()
+            .unwrap_or("document")
+            .to_ascii_lowercase();
+        // Render at the scroll offset for viewport-relative captures so
+        // fixed/sticky content lands where the viewport shows it.
+        let render_at_origin = options.element.is_some()
+            || full_page
+            || (options.clip.is_some() && clip_origin != "viewport");
+        let (render_scroll_x, mut render_scroll_y) = if render_at_origin {
+            (0.0, 0.0)
+        } else {
+            (tab_scroll_x, tab_scroll_y)
+        };
+        let render_options = |scroll_x: f32, scroll_y: f32| RenderOptions {
+            viewport,
+            max_height: 20_000,
+            load_images: true,
+            scroll_x,
+            scroll_y,
+        };
+        let mut rendered = browser
+            .render(&page, render_options(render_scroll_x, render_scroll_y))
             .await?;
+        // Clamp stale scroll positions to the scrollable range before
+        // positioning fixed content or cropping.
+        let max_scroll_y = (rendered.layout.document_height - viewport.height).max(0.0);
+        if render_scroll_y > max_scroll_y {
+            render_scroll_y = max_scroll_y;
+            rendered = browser
+                .render(&page, render_options(render_scroll_x, render_scroll_y))
+                .await?;
+        }
         let image = if let Some(selector) = options.element.as_deref() {
             let node = page
                 .select(selector)
@@ -1285,41 +1476,84 @@ impl ApiService {
             rendered
                 .element_image(node)
                 .ok_or_else(|| ApiError::not_found("element has no rendered box".to_owned()))?
-        } else if options.full_page.unwrap_or(false) {
+        } else if let Some(clip) = options.clip {
+            let (offset_x, offset_y) = if clip_origin == "viewport" {
+                (render_scroll_x, render_scroll_y)
+            } else {
+                (0.0, 0.0)
+            };
+            let rect = crate::engine::layout::Rect {
+                x: clip.x + offset_x,
+                y: clip.y + offset_y,
+                width: clip.width,
+                height: clip.height,
+            };
+            let cropped = screenshots::crop(&rendered.image, rect).ok_or_else(|| {
+                ApiError::bad_request("clip region lies outside the rendered page")
+            })?;
+            match clip.scale {
+                Some(scale) if scale > 0.0 && (scale - 1.0).abs() > f32::EPSILON => {
+                    screenshots::resize(
+                        &cropped,
+                        (cropped.width() as f32 * scale).round().max(1.0) as u32,
+                        (cropped.height() as f32 * scale).round().max(1.0) as u32,
+                    )
+                }
+                _ => cropped,
+            }
+        } else if full_page {
             rendered.image.clone()
         } else {
-            let (scroll_x, scroll_y) = browser
-                .active_tab()
-                .map(|tab| (tab.scroll_x, tab.scroll_y))
-                .unwrap_or((0.0, 0.0));
-            rendered.viewport_image_at(scroll_x, scroll_y)
+            rendered.viewport_image_at(render_scroll_x, render_scroll_y)
         };
         let format = options
             .format
             .as_deref()
             .unwrap_or("png")
             .to_ascii_lowercase();
-        let (format, bytes) = if format == "jpeg" || format == "jpg" {
-            (
+        let (format, bytes) = match format.as_str() {
+            "jpeg" | "jpg" => (
                 "jpeg".to_owned(),
-                rendered
-                    .jpeg_bytes(options.quality.unwrap_or(85))
+                screenshots::jpeg_bytes(&image, options.quality.unwrap_or(90))
                     .map_err(ApiError::from)?,
-            )
-        } else {
-            (
+            ),
+            "webp" => (
+                "webp".to_owned(),
+                screenshots::webp_bytes(&image).map_err(ApiError::from)?,
+            ),
+            _ => (
                 "png".to_owned(),
-                rendered.png_bytes().map_err(ApiError::from)?,
-            )
+                screenshots::png_bytes_with(
+                    &image,
+                    png_compression(options.png_compression.as_deref()),
+                    png_filter(options.png_filter.as_deref()),
+                )
+                .map_err(ApiError::from)?,
+            ),
         };
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let data = json!({
+        let mut data = json!({
             "format": format,
             "width": image.width(),
             "height": image.height(),
             "bytes": bytes.len(),
             "data": encoded,
         });
+        // Base64 output is unchanged by default. Persisting is opt-in via
+        // `save: true` or by supplying an `artifact_name`.
+        if options.save.unwrap_or(false) || options.artifact_name.is_some() {
+            let (path, url) = self.save_screenshot_artifact(
+                &bytes,
+                &format,
+                options.artifact_name.as_deref(),
+                &entry.id,
+            )?;
+            if let Some(map) = data.as_object_mut() {
+                map.insert("path".to_owned(), json!(path.display().to_string()));
+                map.insert("url".to_owned(), json!(url.clone()));
+                map.insert("artifact".to_owned(), json!(url));
+            }
+        }
         self.emit(
             "screenshot",
             Some(&entry.id),
@@ -1445,6 +1679,198 @@ impl ApiService {
         }))
     }
 
+    /// Save a session's browser state and record its API identity so it can be
+    /// rebuilt after a process restart.
+    async fn persist_session(&self, entry: &SessionEntry, name: &str) -> ApiResult<()> {
+        self.write_session_state(entry, name).await?;
+        self.record_persisted_session(entry, name)
+    }
+
+    /// Write the tabs/history/storage snapshot to disk. Profile sessions rely
+    /// on the profile's own session file and return `None` for the path.
+    async fn write_session_state(
+        &self,
+        entry: &SessionEntry,
+        name: &str,
+    ) -> ApiResult<Option<PathBuf>> {
+        let browser = entry.browser.lock().await;
+        if entry.profile.is_some() {
+            browser.save_profile_session()?;
+            Ok(None)
+        } else {
+            let path = session_path(&self.config, &entry.id, Some(name))?;
+            browser.save_session(&path)?;
+            Ok(Some(path))
+        }
+    }
+
+    /// Upsert a session's metadata in the on-disk manifest.
+    fn record_persisted_session(&self, entry: &SessionEntry, name: &str) -> ApiResult<()> {
+        let default_for: Vec<String> = self
+            .defaults
+            .try_read()
+            .map(|defaults| {
+                defaults
+                    .iter()
+                    .filter(|(_, session)| session.as_str() == entry.id)
+                    .map(|(agent, _)| agent.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let meta = PersistedSessionMeta {
+            session_id: entry.id.clone(),
+            owner: entry.owner.clone(),
+            profile: entry.profile.clone(),
+            name: name.to_owned(),
+            created_ms: entry.created_ms,
+            user_agent: entry.user_agent.clone(),
+            viewport: entry.viewport.clone(),
+            default_for,
+            saved_ms: now_ms(),
+        };
+        let mut manifest = read_manifest(&self.config);
+        manifest
+            .sessions
+            .retain(|other| other.session_id != entry.id);
+        manifest.sessions.push(meta);
+        write_manifest(&self.config, &manifest)
+    }
+
+    fn remove_persisted_session(&self, session_id: &str) {
+        let mut manifest = read_manifest(&self.config);
+        let before = manifest.sessions.len();
+        manifest
+            .sessions
+            .retain(|other| other.session_id != session_id);
+        if manifest.sessions.len() != before
+            && let Err(error) = write_manifest(&self.config, &manifest)
+        {
+            tracing::warn!("failed to update API session manifest: {error}");
+        }
+    }
+
+    /// Sessions recorded on disk, for discovery after a restart.
+    pub fn persisted_sessions(&self) -> ApiResult<Value> {
+        let manifest = read_manifest(&self.config);
+        let sessions: Vec<Value> = manifest
+            .sessions
+            .iter()
+            .map(|meta| {
+                json!({
+                    "session_id": meta.session_id,
+                    "owner": meta.owner,
+                    "profile": meta.profile,
+                    "name": meta.name,
+                    "created_ms": meta.created_ms,
+                    "saved_ms": meta.saved_ms,
+                })
+            })
+            .collect();
+        Ok(json!({ "sessions": sessions, "count": sessions.len() }))
+    }
+
+    /// Rebuild persisted sessions into the in-memory registry. This is the
+    /// explicit load-on-restart path; `serve()` also calls it automatically
+    /// when `api_session_persistence_enabled` is set.
+    pub async fn restore_persisted_sessions(&self, agent: Option<&str>) -> ApiResult<Value> {
+        let manifest = read_manifest(&self.config);
+        let mut restored = Vec::new();
+        let mut skipped = Vec::new();
+        let mut failed = Vec::new();
+        for meta in &manifest.sessions {
+            if agent.is_some_and(|agent| meta.owner != agent) {
+                continue;
+            }
+            if self.sessions.read().await.contains_key(&meta.session_id) {
+                skipped.push(json!({ "session_id": meta.session_id, "reason": "already_active" }));
+                continue;
+            }
+            if self.sessions.read().await.len() >= self.config.api_max_sessions {
+                skipped.push(json!({ "session_id": meta.session_id, "reason": "session_limit" }));
+                continue;
+            }
+            match self.rebuild_persisted_session(meta).await {
+                Ok(entry) => {
+                    let id = entry.id.clone();
+                    if let Ok(mut owners) = self.owners.lock() {
+                        owners.insert(id.clone(), meta.owner.clone());
+                    }
+                    if let Some(profile) = entry.profile.as_deref()
+                        && let Ok(mut owners) = self.profile_owners.lock()
+                    {
+                        owners.insert(profile.to_owned(), meta.owner.clone());
+                    }
+                    {
+                        let mut defaults = self.defaults.write().await;
+                        for default_agent in &meta.default_for {
+                            defaults.insert(default_agent.clone(), id.clone());
+                        }
+                    }
+                    self.sessions.write().await.insert(id.clone(), entry);
+                    self.emit(
+                        "session_restored",
+                        Some(&id),
+                        json!({ "session_id": id, "restored": true }),
+                    );
+                    restored.push(id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unrestorable API session {}: {error}",
+                        meta.session_id
+                    );
+                    failed.push(json!({ "session_id": meta.session_id, "error": error.message }));
+                }
+            }
+        }
+        Ok(json!({
+            "restored": restored,
+            "count": restored.len(),
+            "skipped": skipped,
+            "failed": failed,
+        }))
+    }
+
+    async fn rebuild_persisted_session(
+        &self,
+        meta: &PersistedSessionMeta,
+    ) -> ApiResult<Arc<SessionEntry>> {
+        let mut config = self.config.clone();
+        if let Some(user_agent) = meta.user_agent.as_deref() {
+            config.user_agent = user_agent.to_owned();
+        }
+        let mut browser = match meta.profile.as_deref() {
+            Some(profile) => Browser::with_profile(config, profile)?,
+            None => Browser::new(config),
+        };
+        if let Some(viewport) = &meta.viewport
+            && viewport.width > 0
+            && viewport.height > 0
+        {
+            browser.set_viewport(viewport.width, viewport.height)?;
+        }
+        if meta.profile.is_some() {
+            browser.restore_profile_session().await?;
+        } else {
+            let path = session_path(&self.config, &meta.session_id, Some(&meta.name))?;
+            browser.restore_session(&path).await?;
+        }
+        let now = now_ms();
+        Ok(Arc::new(SessionEntry {
+            id: meta.session_id.clone(),
+            owner: meta.owner.clone(),
+            profile: meta.profile.clone(),
+            created_ms: meta.created_ms,
+            last_used_ms: AtomicU64::new(now),
+            browser: tokio::sync::Mutex::new(browser),
+            user_agent: meta.user_agent.clone(),
+            viewport: meta.viewport.clone(),
+            seen_network: Mutex::new(0),
+            seen_console: Mutex::new(0),
+            seen_errors: Mutex::new(0),
+        }))
+    }
+
     pub async fn session_save(
         &self,
         auth: &AuthContext,
@@ -1452,14 +1878,21 @@ impl ApiService {
         options: SessionOptions,
     ) -> ApiResult<Value> {
         let entry = self.resolve(auth, id).await?;
-        let browser = entry.browser.lock().await;
+        let name = options.name.as_deref().unwrap_or("default");
+        let state_path = self.write_session_state(&entry, name).await?;
+        self.record_persisted_session(&entry, name)?;
         if entry.profile.is_some() {
-            browser.save_profile_session()?;
-            return Ok(json!({ "saved": true, "profile": entry.profile }));
+            return Ok(json!({
+                "saved": true,
+                "profile": entry.profile,
+                "persisted": true,
+            }));
         }
-        let path = session_path(&self.config, &entry.id, options.name.as_deref())?;
-        browser.save_session(&path)?;
-        Ok(json!({ "saved": true, "path": path.display().to_string() }))
+        Ok(json!({
+            "saved": true,
+            "path": state_path.map(|path| path.display().to_string()).unwrap_or_default(),
+            "persisted": true,
+        }))
     }
 
     pub async fn session_restore(
@@ -1756,6 +2189,74 @@ fn parse_button(button: Option<&str>) -> ApiResult<MouseButton> {
     }
 }
 
+/// Metadata for an API session that has been persisted to disk. Keeping this
+/// registry outside the in-memory session map is what lets sessions survive a
+/// process restart: the browser state file holds tabs/history/storage while
+/// this record holds the API-level identity (owner, profile, defaults, ...).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedSessionMeta {
+    session_id: String,
+    owner: String,
+    profile: Option<String>,
+    name: String,
+    created_ms: u64,
+    user_agent: Option<String>,
+    viewport: Option<ViewportOptions>,
+    /// Agents for which this session was the default at save time.
+    default_for: Vec<String>,
+    saved_ms: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionManifest {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    sessions: Vec<PersistedSessionMeta>,
+}
+
+fn sessions_dir(config: &crate::config::Config) -> PathBuf {
+    config.data_dir.join("api-sessions")
+}
+
+fn manifest_path(config: &crate::config::Config) -> PathBuf {
+    sessions_dir(config).join("manifest.json")
+}
+
+/// Read the session manifest. Missing or corrupt files are treated as an empty
+/// registry so a damaged disk state never prevents the control plane starting.
+fn read_manifest(config: &crate::config::Config) -> SessionManifest {
+    let path = manifest_path(config);
+    let bytes = match read_locked(&path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return SessionManifest::default(),
+        Err(error) => {
+            tracing::warn!(
+                "cannot read API session manifest {}: {error}",
+                path.display()
+            );
+            return SessionManifest::default();
+        }
+    };
+    match serde_json::from_slice::<SessionManifest>(&bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                "ignoring corrupt API session manifest {}: {error}",
+                path.display()
+            );
+            SessionManifest::default()
+        }
+    }
+}
+
+fn write_manifest(config: &crate::config::Config, manifest: &SessionManifest) -> ApiResult<()> {
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|error| ApiError::internal(format!("serialize session manifest: {error}")))?;
+    write_atomic(&manifest_path(config), &bytes)
+        .map_err(|error| ApiError::internal(format!("write session manifest: {error}")))
+}
+
 fn session_path(
     config: &crate::config::Config,
     session_id: &str,
@@ -1778,9 +2279,110 @@ fn session_path(
         .join(format!("{session_id}-{name}.json")))
 }
 
+/// Validate a caller-supplied artifact base name. Only a single path-free
+/// component made of ASCII alphanumerics, `-`, `_` and `.` is accepted, which
+/// prevents directory traversal and hidden-file creation.
+pub(crate) fn validate_artifact_name(name: &str) -> ApiResult<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 120
+        || name.starts_with('.')
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(ApiError::bad_request(
+            "artifact name must be 1-120 alphanumeric, '-', '_' or '.' characters without path separators",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "session".to_owned()
+    } else {
+        sanitized.chars().take(64).collect()
+    }
+}
+
+/// Keep the artifact store bounded by removing the oldest image files when the
+/// configured limit is exceeded. Lock/temp files from atomic writes and
+/// unrelated files are ignored.
+fn prune_artifacts(dir: &Path, max_files: usize) {
+    if max_files == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let is_image = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp"
+                    )
+                });
+            if !is_image {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    if files.len() <= max_files {
+        return;
+    }
+    files.sort_by_key(|(modified, _)| *modified);
+    let excess = files.len() - max_files;
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn png_compression(value: Option<&str>) -> CompressionType {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        Some("default") => CompressionType::Default,
+        Some("best") => CompressionType::Best,
+        Some("uncompressed") => CompressionType::Uncompressed,
+        _ => CompressionType::Fast,
+    }
+}
+
+fn png_filter(value: Option<&str>) -> FilterType {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        Some("none") => FilterType::NoFilter,
+        Some("up") => FilterType::Up,
+        Some("avg") => FilterType::Avg,
+        Some("paeth") => FilterType::Paeth,
+        Some("adaptive") => FilterType::Adaptive,
+        _ => FilterType::Sub,
+    }
 }

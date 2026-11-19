@@ -30,6 +30,13 @@ use crate::mcp;
 #[derive(Deserialize)]
 struct NavigateBody {
     url: String,
+    session_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SessionQuery {
+    session_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -105,6 +112,12 @@ pub fn router(service: Arc<ApiService>) -> Router {
         .route("/browser/tabs/switch", post(tabs_switch))
         .route("/browser/session/save", post(session_save))
         .route("/browser/session/restore", post(session_restore))
+        .route("/browser/session/persisted", get(session_persisted_list))
+        .route(
+            "/browser/session/restore-persisted",
+            post(session_restore_persisted),
+        )
+        .route("/artifacts/{name}", get(artifact))
         .route("/browser/dom", get(dom))
         .route("/browser/network", get(network))
         .route("/browser/console", get(console))
@@ -422,11 +435,19 @@ async fn create(
     respond(service.create(&auth, options).await)
 }
 
-async fn close(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn close(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     let id = match session {
         Some(id) => id,
         None => match service.resolve(&auth, None).await {
@@ -437,11 +458,19 @@ async fn close(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Re
     respond(service.close(&auth, &id).await)
 }
 
-async fn status(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn status(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.status(&auth, session.as_deref()).await)
 }
 
@@ -450,34 +479,59 @@ async fn navigate(
     headers: HeaderMap,
     ApiJson(body): ApiJson<NavigateBody>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, body.session_id.as_deref());
     respond(service.navigate(&auth, session.as_deref(), &body.url).await)
 }
 
-async fn back(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn back(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.back(&auth, session.as_deref()).await)
 }
 
-async fn forward(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn forward(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.forward(&auth, session.as_deref()).await)
 }
 
-async fn reload(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn reload(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.reload(&auth, session.as_deref()).await)
 }
 
@@ -486,10 +540,11 @@ async fn click(
     headers: HeaderMap,
     ApiJson(options): ApiJson<ClickOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.click(&auth, session.as_deref(), options).await)
 }
 
@@ -498,10 +553,11 @@ async fn type_text(
     headers: HeaderMap,
     ApiJson(options): ApiJson<TypeOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.type_text(&auth, session.as_deref(), options).await)
 }
 
@@ -510,10 +566,11 @@ async fn press(
     headers: HeaderMap,
     ApiJson(options): ApiJson<PressOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.press(&auth, session.as_deref(), options).await)
 }
 
@@ -522,10 +579,11 @@ async fn scroll(
     headers: HeaderMap,
     ApiJson(options): ApiJson<ScrollOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.scroll(&auth, session.as_deref(), options).await)
 }
 
@@ -534,10 +592,11 @@ async fn hover(
     headers: HeaderMap,
     ApiJson(options): ApiJson<HoverOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.hover(&auth, session.as_deref(), options).await)
 }
 
@@ -546,10 +605,11 @@ async fn screenshot(
     headers: HeaderMap,
     ApiJson(options): ApiJson<ScreenshotOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.screenshot(&auth, session.as_deref(), options).await)
 }
 
@@ -558,18 +618,27 @@ async fn snapshot(
     headers: HeaderMap,
     ApiJson(options): ApiJson<SnapshotOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.snapshot(&auth, session.as_deref(), options).await)
 }
 
-async fn extract(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn extract(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.extract(&auth, session.as_deref()).await)
 }
 
@@ -578,18 +647,27 @@ async fn evaluate(
     headers: HeaderMap,
     ApiJson(options): ApiJson<EvaluateOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.evaluate(&auth, session.as_deref(), options).await)
 }
 
-async fn tabs(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn tabs(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.tabs(&auth, session.as_deref()).await)
 }
 
@@ -598,10 +676,11 @@ async fn tabs_create(
     headers: HeaderMap,
     ApiJson(options): ApiJson<TabsCreateOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(
         service
             .tabs_create(&auth, session.as_deref(), options)
@@ -614,10 +693,11 @@ async fn tabs_close(
     headers: HeaderMap,
     ApiJson(options): ApiJson<TabsTargetOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.tabs_close(&auth, session.as_deref(), options).await)
 }
 
@@ -626,10 +706,11 @@ async fn tabs_switch(
     headers: HeaderMap,
     ApiJson(options): ApiJson<TabsTargetOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(
         service
             .tabs_switch(&auth, session.as_deref(), options)
@@ -642,10 +723,11 @@ async fn session_save(
     headers: HeaderMap,
     ApiJson(options): ApiJson<SessionOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(
         service
             .session_save(&auth, session.as_deref(), options)
@@ -658,10 +740,11 @@ async fn session_restore(
     headers: HeaderMap,
     ApiJson(options): ApiJson<SessionOptions>,
 ) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = pick_session(header_session, options.session_id.as_deref());
     respond(
         service
             .session_restore(&auth, session.as_deref(), options)
@@ -669,27 +752,107 @@ async fn session_restore(
     )
 }
 
-async fn dom(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn session_persisted_list(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = auth_context(&service, &headers) {
+        return respond(Err(error));
+    }
+    respond(service.persisted_sessions())
+}
+
+async fn session_restore_persisted(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+) -> Response {
+    let (auth, _) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    respond(service.restore_persisted_sessions(Some(&auth.agent)).await)
+}
+
+async fn artifact(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Err(error) = auth_context(&service, &headers) {
+        return respond(Err(error));
+    }
+    match service.read_artifact(&name) {
+        Ok(bytes) => {
+            let content_type = match name
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                _ => "image/png",
+            };
+            (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static(content_type),
+                )],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(error) => respond(Err(error)),
+    }
+}
+
+async fn dom(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.dom_tree(&auth, session.as_deref()).await)
 }
 
-async fn network(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn network(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.network(&auth, session.as_deref()).await)
 }
 
-async fn console(State(service): State<Arc<ApiService>>, headers: HeaderMap) -> Response {
-    let (auth, session) = match auth_context(&service, &headers) {
+async fn console(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    Query(query): Query<SessionQuery>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
         Ok(value) => value,
         Err(error) => return respond(Err(error)),
     };
+    let session = query
+        .session_id
+        .filter(|id| !id.is_empty())
+        .or(header_session);
     respond(service.console(&auth, session.as_deref()).await)
 }
 
@@ -909,6 +1072,12 @@ pub(crate) fn auth_context(
 ) -> ApiResult<(AuthContext, Option<String>)> {
     let (token, agent, session) = credentials(headers);
     Ok((service.authenticate(token, agent)?, session))
+}
+
+fn pick_session(header: Option<String>, body: Option<&str>) -> Option<String> {
+    body.filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or(header)
 }
 
 fn credentials(headers: &HeaderMap) -> (Option<&str>, Option<&str>, Option<String>) {

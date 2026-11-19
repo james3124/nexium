@@ -57,10 +57,10 @@ hr { display: block; height: 0; border: 0; border-top: 1px solid #cccccc; margin
 table { display: table; border-spacing: 2px; }
 tr { display: table-row; }
 thead, tbody, tfoot { display: table-row-group; }
-td, th { display: table-cell; padding: 1px; }
+td, th { display: table-cell; padding: 1px; text-align: left; }
 caption { display: block; }
 colgroup, col { display: none; }
-th { font-weight: bold; }
+th { font-weight: bold; text-align: center; }
 fieldset { display: block; margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 1px solid #cccccc; }
 legend { padding: 0 2px; }
 

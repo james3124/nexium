@@ -8,10 +8,46 @@
 //! `:last-child`, `:only-child`, `:root`, `:empty`, `:link`, `:checked`,
 //! `:nth-child()`, `:nth-last-child()` and `:not()`.
 //!
-//! Unsupported/dynamic pseudo-classes (e.g. `:hover`) parse successfully but
-//! never match; rules using pseudo-elements match nothing.
+//! The interactive pseudo-classes `:hover`, `:focus`, `:focus-visible` and
+//! `:focus-within` are also understood. Their targets are published on the
+//! current thread by the interaction layer before each style resolution:
+//! `:hover` reads a target stored on `Document`, while [`set_focus_target`]
+//! maintains a thread-local focus target (the JavaScript runtime runs on a
+//! separate thread, so focus is mirrored back to the host session).
+//!
+//! Other dynamic/unsupported pseudo-classes parse successfully but never
+//! match; rules using pseudo-elements match nothing.
+
+use std::cell::Cell;
 
 use super::{AttributeNamespace, Document, DomError, Namespace, NodeId};
+
+thread_local! {
+    /// Element currently focused in the host session, used for `:focus`,
+    /// `:focus-visible` and `:focus-within`.
+    static FOCUS_TARGET: Cell<Option<NodeId>> = const { Cell::new(None) };
+    /// Whether the current focus should render a visibility indicator.
+    static FOCUS_VISIBLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Publish the focused element for CSS pseudo-class matching on this thread.
+///
+/// `visible` models `:focus-visible` (typically true for keyboard and
+/// script-driven focus, false for pointer focus).
+pub fn set_focus_target(target: Option<NodeId>, visible: bool) {
+    FOCUS_TARGET.with(|cell| cell.set(target));
+    FOCUS_VISIBLE.with(|cell| cell.set(visible));
+}
+
+/// Element currently focused, as published by [`set_focus_target`].
+pub fn focus_target() -> Option<NodeId> {
+    FOCUS_TARGET.with(Cell::get)
+}
+
+/// Whether the current focus is "visible" for `:focus-visible`.
+pub fn focus_is_visible() -> bool {
+    FOCUS_VISIBLE.with(Cell::get)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Combinator {
@@ -141,6 +177,9 @@ pub enum PseudoClass {
     Link,
     Checked,
     Hover,
+    Focus,
+    FocusVisible,
+    FocusWithin,
     NthChild(Nth),
     NthLastChild(Nth),
     Not(Vec<ComplexSelector>),
@@ -495,6 +534,9 @@ fn parse_pseudo(
         "link" | "any-link" => PseudoClass::Link,
         "checked" => PseudoClass::Checked,
         "hover" => PseudoClass::Hover,
+        "focus" => PseudoClass::Focus,
+        "focus-visible" => PseudoClass::FocusVisible,
+        "focus-within" => PseudoClass::FocusWithin,
         _ => PseudoClass::Never,
     };
     Ok((ParsedPseudo::Class(class), i))
@@ -999,6 +1041,10 @@ fn pseudo_matches(doc: &Document, id: NodeId, pseudo: &PseudoClass) -> bool {
             .element(id)
             .is_some_and(|el| el.has_attribute("checked") || el.has_attribute("selected")),
         PseudoClass::Hover => doc.hover_target() == Some(id),
+        PseudoClass::Focus => focus_target() == Some(id),
+        PseudoClass::FocusVisible => focus_target() == Some(id) && focus_is_visible(),
+        PseudoClass::FocusWithin => focus_target()
+            .is_some_and(|focused| focused == id || doc.ancestors(focused).contains(&id)),
         PseudoClass::NthChild(nth) => element_index(doc, id).is_some_and(|i| nth.matches(i)),
         PseudoClass::NthLastChild(nth) => {
             element_index_from_end(doc, id).is_some_and(|i| nth.matches(i))
@@ -1069,5 +1115,34 @@ mod tests {
 
         doc.set_hover_target(None);
         assert!(!doc.matches(b, "p:hover").unwrap());
+    }
+
+    #[test]
+    fn focus_pseudos_match_focused_element_and_ancestors() {
+        use super::{focus_is_visible, set_focus_target};
+
+        let doc = parse_html(r#"<div id="a"><p id="b">x</p><p id="c">y</p></div>"#);
+        let a = doc.select("#a").unwrap().unwrap();
+        let b = doc.select("#b").unwrap().unwrap();
+        let c = doc.select("#c").unwrap().unwrap();
+
+        set_focus_target(None, false);
+        assert!(!doc.matches(b, "p:focus").unwrap());
+        assert!(!doc.matches(a, "div:focus-within").unwrap());
+
+        set_focus_target(Some(b), true);
+        assert!(doc.matches(b, "p:focus").unwrap());
+        assert!(doc.matches(b, "p:focus-visible").unwrap());
+        assert!(!doc.matches(c, "p:focus").unwrap());
+        assert!(doc.matches(a, "div:focus-within").unwrap());
+        assert!(doc.matches(b, "#a p:focus").unwrap());
+
+        set_focus_target(Some(b), false);
+        assert!(doc.matches(b, "p:focus").unwrap());
+        assert!(!doc.matches(b, "p:focus-visible").unwrap());
+
+        set_focus_target(None, false);
+        assert!(!focus_is_visible());
+        assert!(!doc.matches(a, "div:focus-within").unwrap());
     }
 }

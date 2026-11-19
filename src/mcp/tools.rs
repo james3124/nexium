@@ -95,6 +95,10 @@ pub async fn call(
             let args: SessionOptions = parse(&arguments)?;
             service.session_restore(auth, session, args).await
         }
+        "browser_session_list_persisted" => service.persisted_sessions(),
+        "browser_session_restore_persisted" => {
+            service.restore_persisted_sessions(Some(&auth.agent)).await
+        }
         "browser_evaluate" => {
             let args: EvaluateOptions = parse(&arguments)?;
             service.evaluate(auth, session, args).await
@@ -305,11 +309,22 @@ pub fn tool_definitions() -> Vec<Value> {
     session_property(&mut properties);
     properties.insert(
         "format".to_owned(),
-        json!({ "type": "string", "enum": ["png", "jpeg", "jpg"] }),
+        json!({ "type": "string", "enum": ["png", "jpeg", "jpg", "webp"] }),
+    );
+    properties.insert(
+        "png_compression".to_owned(),
+        json!({ "type": "string", "enum": ["fast", "default", "best", "uncompressed"] }),
+    );
+    properties.insert(
+        "png_filter".to_owned(),
+        json!({ "type": "string", "enum": ["none", "sub", "up", "avg", "paeth", "adaptive"] }),
     );
     properties.insert(
         "quality".to_owned(),
-        json!({ "type": "integer", "minimum": 1, "maximum": 100 }),
+        json!({
+            "type": "integer", "minimum": 1, "maximum": 100,
+            "description": "JPEG quality (default 90); WebP output is lossless."
+        }),
     );
     properties.insert(
         "full_page".to_owned(),
@@ -319,9 +334,45 @@ pub fn tool_definitions() -> Vec<Value> {
         "element".to_owned(),
         json!({ "type": "string", "description": "CSS selector for an element crop." }),
     );
+    properties.insert(
+        "clip".to_owned(),
+        json!({
+            "type": "object",
+            "description": "Crop region in CSS pixels, relative to clip_origin.",
+            "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" },
+                "width": { "type": "number" },
+                "height": { "type": "number" },
+                "scale": { "type": "number", "description": "Output scale factor (default 1)." }
+            },
+            "required": ["width", "height"]
+        }),
+    );
+    properties.insert(
+        "clip_origin".to_owned(),
+        json!({
+            "type": "string", "enum": ["document", "viewport"],
+            "description": "Coordinate space for clip (default document)."
+        }),
+    );
+    properties.insert(
+        "save".to_owned(),
+        json!({
+            "type": "boolean",
+            "description": "Persist the encoded image to the artifacts directory and return its path/URL (default false)."
+        }),
+    );
+    properties.insert(
+        "artifact_name".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Optional safe file name (no path separators) for the persisted artifact; implies save."
+        }),
+    );
     tools.push(tool(
         "browser_screenshot",
-        "Capture a PNG/JPEG screenshot and return base64 image data.",
+        "Capture a PNG/JPEG/WebP screenshot and return base64 image data; optionally persist it to disk.",
         properties,
     ));
 
@@ -407,6 +458,17 @@ pub fn tool_definitions() -> Vec<Value> {
         "browser_session_restore",
         "Restore a previously saved session snapshot.",
         properties,
+    ));
+
+    tools.push(tool(
+        "browser_session_list_persisted",
+        "List API sessions persisted to disk (available after a process restart).",
+        Map::new(),
+    ));
+    tools.push(tool(
+        "browser_session_restore_persisted",
+        "Rebuild this agent's persisted sessions into the live registry after a restart.",
+        Map::new(),
     ));
 
     let mut properties = Map::new();

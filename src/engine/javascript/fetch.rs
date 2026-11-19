@@ -111,6 +111,27 @@ fn extract_header_pairs(value: &JsValue, context: &mut Context) -> Vec<(String, 
     pairs
 }
 
+/// Convert a fetch/XHR body value into bytes. `FormData` bodies are encoded as
+/// `multipart/form-data` and contribute a matching `Content-Type` header
+/// (unless the caller explicitly supplied one).
+fn body_bytes(
+    value: &JsValue,
+    header_pairs: &mut Vec<(String, String)>,
+    context: &mut Context,
+) -> Vec<u8> {
+    if let Some((bytes, content_type)) = super::webapi::form_data_multipart(value, context) {
+        if !header_pairs
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            header_pairs.push(("Content-Type".to_owned(), content_type));
+        }
+        bytes
+    } else {
+        value_to_display(value, context).into_bytes()
+    }
+}
+
 fn rejected_promise(message: &str, context: &mut Context) -> JsResult<JsValue> {
     let message = message.to_owned();
     let promise = JsPromise::new(
@@ -129,7 +150,7 @@ fn rejected_promise(message: &str, context: &mut Context) -> JsResult<JsValue> {
 fn js_fetch(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let mut input = string_arg(args, 0, context);
     let mut method = "GET".to_owned();
-    let mut body = String::new();
+    let mut body: Vec<u8> = Vec::new();
     let mut header_pairs: Vec<(String, String)> = Vec::new();
     let mut aborted = false;
 
@@ -148,11 +169,16 @@ fn js_fetch(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
             if let Ok(value) = object.get(JsString::from("__nexium_method"), context) {
                 method = value_to_display(&value, context);
             }
-            if let Ok(value) = object.get(JsString::from("__nexium_body"), context) {
-                body = value_to_display(&value, context);
-            }
             if let Ok(value) = object.get(JsString::from(super::webapi::HEADERS_KEY), context) {
                 header_pairs = extract_header_pairs(&value, context);
+            }
+            // The body is processed last: a FormData body adds its generated
+            // Content-Type to `header_pairs` without clobbering supplied
+            // headers.
+            if let Ok(value) = object.get(JsString::from("__nexium_body"), context)
+                && !value.is_null_or_undefined()
+            {
+                body = body_bytes(&value, &mut header_pairs, context);
             }
             if let Ok(value) = object.get(JsString::from("__nexium_signal"), context)
                 && let Some(signal) = value.as_object()
@@ -172,16 +198,16 @@ fn js_fetch(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResul
         {
             method = value.to_std_string_escaped();
         }
-        if let Ok(value) = options.get(JsString::from("body"), context)
-            && !value.is_null_or_undefined()
-        {
-            body = value_to_display(&value, context);
-        }
         if let Ok(headers) = options.get(JsString::from("headers"), context) {
             let pairs = extract_header_pairs(&headers, context);
             if !pairs.is_empty() {
                 header_pairs = pairs;
             }
+        }
+        if let Ok(value) = options.get(JsString::from("body"), context)
+            && !value.is_null_or_undefined()
+        {
+            body = body_bytes(&value, &mut header_pairs, context);
         }
         if let Ok(signal) = options.get(JsString::from("signal"), context)
             && let Some(signal) = signal.as_object()
@@ -457,12 +483,12 @@ fn js_xhr_construct(
         .property(
             JsString::from("__nexium_method"),
             js_string_value("GET"),
-            Attribute::empty(),
+            Attribute::WRITABLE,
         )
         .property(
             JsString::from("__nexium_url"),
             js_string_value(""),
-            Attribute::empty(),
+            Attribute::WRITABLE,
         );
     for (name, function) in [
         ("open", NativeFunction::from_fn_ptr(js_xhr_open)),
@@ -562,10 +588,11 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let Some(url) = absolute_url(&url_text) else {
         return Ok(JsValue::undefined());
     };
+    let mut generated_headers: Vec<(String, String)> = Vec::new();
     let body = args
         .first()
-        .and_then(|value| value.as_string())
-        .map(|value| value.to_std_string_escaped())
+        .filter(|value| !value.is_null_or_undefined())
+        .map(|value| body_bytes(value, &mut generated_headers, context))
         .unwrap_or_default();
     let mut request = Request::new(
         hyper::Method::from_bytes(method.as_bytes()).unwrap_or(hyper::Method::GET),
@@ -588,6 +615,16 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                         request.headers.insert(header, header_value);
                     }
                 }
+            }
+        }
+    }
+    for (name, value) in generated_headers {
+        if !request.headers.contains_key(name.as_str()) {
+            if let (Ok(header), Ok(header_value)) = (
+                hyper::header::HeaderName::from_bytes(name.as_bytes()),
+                hyper::header::HeaderValue::from_str(&value),
+            ) {
+                request.headers.insert(header, header_value);
             }
         }
     }

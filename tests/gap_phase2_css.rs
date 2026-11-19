@@ -7,7 +7,7 @@ use std::sync::Arc;
 use image::RgbaImage;
 use nexium::engine::css::ua::UA_CSS;
 use nexium::engine::css::{
-    BorderCollapse, CaptionSide, Color, ComputedStyle, Rule, StyleResolver, Viewport,
+    BorderCollapse, CaptionSide, Color, ComputedStyle, Rule, StyleResolver, TextAlign, Viewport,
     parse_declaration_list, parse_stylesheet, user_agent_stylesheet,
 };
 use nexium::engine::dom::{Document, NodeId};
@@ -379,5 +379,33 @@ fn transform_translate_and_scale_change_geometry() {
         (rect.x + 50.0).abs() < 0.5,
         "scaled about center: x {}",
         rect.x
+    );
+}
+
+#[test]
+fn legacy_align_attribute_resets_inherited_center() {
+    let viewport = Viewport {
+        width: 800.0,
+        height: 600.0,
+    };
+    let html = r#"<center><table><tr>
+        <td id="left">left</td><td id="right" align="right">right</td>
+        <th id="head">head</th></tr></table></center>"#;
+    assert_eq!(
+        compute("", html, "#left", viewport).text_align,
+        TextAlign::Left
+    );
+    assert_eq!(
+        compute("", html, "#right", viewport).text_align,
+        TextAlign::Right
+    );
+    assert_eq!(
+        compute("", html, "#head", viewport).text_align,
+        TextAlign::Center
+    );
+    assert_eq!(
+        compute("td { text-align: justify }", html, "#left", viewport).text_align,
+        TextAlign::Justify,
+        "author rules must win over the align attribute"
     );
 }

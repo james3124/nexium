@@ -131,6 +131,7 @@ async fn switch_tab(
             Some(session),
             TabsTargetOptions {
                 tab_id: Some(tab_id),
+                session_id: None,
             },
         )
         .await
@@ -271,7 +272,10 @@ async fn dispatch(
                 },
                 "browsingContext.create" => {
                     let url = params.get("url").and_then(Value::as_str).map(str::to_owned);
-                    let options = TabsCreateOptions { url };
+                    let options = TabsCreateOptions {
+                        url,
+                        session_id: None,
+                    };
                     match service.tabs_create(auth, Some(&session_id), options).await {
                         Ok(value) => {
                             let context = value
@@ -355,7 +359,14 @@ async fn dispatch(
                         .unwrap_or_default();
                     let tab_id = context.parse::<u64>().ok();
                     match service
-                        .tabs_close(auth, Some(&session_id), TabsTargetOptions { tab_id })
+                        .tabs_close(
+                            auth,
+                            Some(&session_id),
+                            TabsTargetOptions {
+                                tab_id,
+                                session_id: None,
+                            },
+                        )
                         .await
                     {
                         Ok(_) => {
@@ -378,11 +389,48 @@ async fn dispatch(
                     {
                         return error_reply(id, code, message);
                     }
+                    let format = params
+                        .get("format")
+                        .and_then(|format| format.get("type"))
+                        .and_then(Value::as_str)
+                        .map(|kind| match kind {
+                            "image/jpeg" | "image/jpg" => "jpeg",
+                            "image/webp" => "webp",
+                            _ => "png",
+                        })
+                        .unwrap_or("png")
+                        .to_owned();
+                    let quality = params
+                        .get("format")
+                        .and_then(|format| format.get("quality"))
+                        .and_then(Value::as_f64)
+                        .map(|quality| quality.clamp(1.0, 100.0) as u8);
+                    let clip = params.get("clip").and_then(Value::as_object).map(|clip| {
+                        let number =
+                            |key: &str| clip.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+                        crate::api::service::ScreenshotClip {
+                            x: number("x") as f32,
+                            y: number("y") as f32,
+                            width: number("width") as f32,
+                            height: number("height") as f32,
+                            scale: None,
+                        }
+                    });
+                    let origin = params
+                        .get("origin")
+                        .and_then(Value::as_str)
+                        .unwrap_or("viewport")
+                        .to_ascii_lowercase();
+                    // A document-origin capture without a clip region spans
+                    // the whole document, not just the visible viewport.
+                    let full_page = clip.is_none() && origin == "document";
                     let options = ScreenshotOptions {
-                        format: Some("png".to_owned()),
-                        quality: None,
-                        full_page: Some(false),
-                        element: None,
+                        format: Some(format),
+                        quality,
+                        full_page: Some(full_page),
+                        clip,
+                        clip_origin: Some(origin),
+                        ..Default::default()
                     };
                     match service.screenshot(auth, Some(&session_id), options).await {
                         Ok(value) => ok_reply(
@@ -409,7 +457,10 @@ async fn dispatch(
                     {
                         return error_reply(id, code, message);
                     }
-                    let options = EvaluateOptions { script: expression };
+                    let options = EvaluateOptions {
+                        script: expression,
+                        session_id: None,
+                    };
                     match service.evaluate(auth, Some(&session_id), options).await {
                         Ok(value) => {
                             let result = value.get("result").cloned().unwrap_or(Value::Null);
@@ -442,7 +493,10 @@ async fn dispatch(
                     let args =
                         serde_json::to_string(&arguments).unwrap_or_else(|_| "[]".to_owned());
                     let script = format!("({declaration})(...{args})");
-                    let options = EvaluateOptions { script };
+                    let options = EvaluateOptions {
+                        script,
+                        session_id: None,
+                    };
                     match service.evaluate(auth, Some(&session_id), options).await {
                         Ok(value) => {
                             let result = value.get("result").cloned().unwrap_or(Value::Null);

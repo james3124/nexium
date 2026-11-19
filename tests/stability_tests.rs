@@ -107,6 +107,7 @@ async fn repeated_navigation_and_rendering_stays_bounded() {
                     viewport,
                     max_height: 2000,
                     load_images: false,
+                    ..Default::default()
                 },
             )
             .await
@@ -155,6 +156,7 @@ async fn large_generated_document_parses_and_renders() {
                 viewport,
                 max_height: 4000,
                 load_images: false,
+                ..Default::default()
             },
         )
         .await
@@ -183,6 +185,7 @@ async fn soak_navigation_and_rendering_stays_bounded() {
                     viewport,
                     max_height: 2000,
                     load_images: false,
+                    ..Default::default()
                 },
             )
             .await

@@ -366,6 +366,30 @@ pub enum Display {
     TableCell,
 }
 
+/// `float` values. Not inherited; initial `none`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Float {
+    None,
+    Left,
+    Right,
+}
+
+/// `clear` values. Not inherited; initial `none`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clear {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+/// `table-layout` values. Not inherited; initial `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableLayout {
+    Auto,
+    Fixed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Position {
     Static,

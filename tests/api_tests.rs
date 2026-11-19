@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use bytes::Bytes;
 use common::spawn_test_server;
 use futures_util::{SinkExt, StreamExt};
@@ -350,6 +351,37 @@ async fn rest_controls_a_live_browser_session() {
     assert_eq!(screenshot.status, 200, "{}", screenshot.body);
     assert!(screenshot.body["data"]["data"].as_str().unwrap().len() > 100);
     assert_eq!(screenshot.body["data"]["width"].as_u64(), Some(800));
+
+    let clipped = http(
+        addr,
+        "POST",
+        "/browser/screenshot",
+        None,
+        Some("agent-a"),
+        Some(&session),
+        Some(json!({
+            "format": "png",
+            "clip": { "x": 10, "y": 20, "width": 100, "height": 50, "scale": 2 }
+        })),
+    )
+    .await;
+    assert_eq!(clipped.status, 200, "{}", clipped.body);
+    assert_eq!(clipped.body["data"]["width"].as_u64(), Some(200));
+    assert_eq!(clipped.body["data"]["height"].as_u64(), Some(100));
+
+    let webp = http(
+        addr,
+        "POST",
+        "/browser/screenshot",
+        None,
+        Some("agent-a"),
+        Some(&session),
+        Some(json!({ "format": "webp" })),
+    )
+    .await;
+    assert_eq!(webp.status, 200, "{}", webp.body);
+    assert_eq!(webp.body["data"]["format"], "webp");
+    assert!(webp.body["data"]["data"].as_str().unwrap().len() > 100);
 
     let network = http(
         addr,
@@ -839,6 +871,75 @@ async fn event_stream_reports_navigation_console_and_network() {
         "{seen:?}"
     );
     assert!(network, "{seen:?}");
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn screenshots_encode_the_cropped_image_and_webp() {
+    let web = spawn_test_server().await;
+    let (addr, _service, data_dir) = spawn_api(None).await;
+    let created = http(
+        addr,
+        "POST",
+        "/browser/create",
+        None,
+        Some("agent-a"),
+        None,
+        Some(json!({
+            "url": format!("http://{web}/interact"),
+            "viewport": { "width": 800, "height": 600 }
+        })),
+    )
+    .await;
+    let session = created.body["data"]["session_id"].as_str().unwrap();
+
+    let png = http(
+        addr,
+        "POST",
+        "/browser/screenshot",
+        None,
+        Some("agent-a"),
+        Some(session),
+        Some(json!({
+            "format": "png",
+            "element": "#btn",
+            "png_compression": "best",
+            "png_filter": "paeth"
+        })),
+    )
+    .await;
+    assert_eq!(png.status, 200, "{}", png.body);
+    let png_bytes = base64::engine::general_purpose::STANDARD
+        .decode(png.body["data"]["data"].as_str().unwrap())
+        .unwrap();
+    let decoded = image::load_from_memory(&png_bytes).unwrap();
+    assert_eq!(decoded.width() as u64, png.body["data"]["width"]);
+    assert_eq!(decoded.height() as u64, png.body["data"]["height"]);
+    assert!(
+        decoded.width() < 800,
+        "element crop should be narrower than the viewport"
+    );
+
+    let webp = http(
+        addr,
+        "POST",
+        "/browser/screenshot",
+        None,
+        Some("agent-a"),
+        Some(session),
+        Some(json!({ "format": "webp", "element": "#btn" })),
+    )
+    .await;
+    assert_eq!(webp.status, 200, "{}", webp.body);
+    let webp_bytes = base64::engine::general_purpose::STANDARD
+        .decode(webp.body["data"]["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(&webp_bytes[0..4], b"RIFF");
+    assert_eq!(&webp_bytes[8..12], b"WEBP");
+    let decoded = image::load_from_memory(&webp_bytes).unwrap();
+    assert_eq!(decoded.width() as u64, webp.body["data"]["width"]);
+    assert_eq!(decoded.height() as u64, webp.body["data"]["height"]);
 
     let _ = std::fs::remove_dir_all(data_dir);
 }

@@ -64,7 +64,9 @@ limitations and licensing details. Product overview and usage live in
   dashed/dotted/double borders, text glyph rasterization (bundled DejaVu
   Sans/Serif/Mono with synthetic italics), underlines, list markers, replaced
   images, basic z-index ordering, alpha compositing and opacity.
-- Screenshots: full page, viewport and element crops; PNG and JPEG output;
+- Screenshots: full page, viewport and element crops; PNG, JPEG and lossless
+  WebP output with tunable PNG compression/filter and JPEG quality; clip
+  regions with output scale; fixed/sticky-aware scrolled viewport captures;
   resizing and pixel comparison; `--screenshot` CLI support.
 - Author stylesheets: `<style>` blocks, `<link rel="stylesheet">` resources and
   `@import` chains are fetched and applied in document order.
@@ -146,7 +148,8 @@ limitations and licensing details. Product overview and usage live in
   `browser_status.memory` expose process RSS/VSZ/threads and system memory.
 - Memory behavior: font families load lazily (only the families a page uses),
   and freed allocator arenas are trimmed when sessions close on GNU targets.
-- Screenshots: full page, scrolled viewport crops and element crops.
+- Screenshots: full page, scrolled viewport crops (fixed/sticky content is
+  laid out at the scroll offset) and element crops, plus clip regions.
 - Accessibility tree extraction with inferred roles, accessible names,
   values and checked/expanded/disabled states.
 - Structured DOM snapshots (serialized HTML, visible text, counts,
@@ -238,10 +241,10 @@ limitations and licensing details. Product overview and usage live in
 - Browser-wide benchmark (`examples/benchmark.rs`) reporting parse, render
   and JS throughput together with process RSS; optionally runs a timed soak.
 
-Not implemented yet: CSS transforms/transitions/animations, floats, CSS Grid
-subgrid/named lines/auto-fit, flex column wrapping, SVG filters/advanced
-gradient transforms, box shadows, and HTTP/3. These are tracked in
-[ROADMAP.md](ROADMAP.md).
+Not implemented yet: CSS transforms/transitions/animations, CSS Grid
+subgrid/named lines, SVG filters/advanced gradient transforms, box shadows,
+and HTTP/3. Floats, `clear`, `table-layout: fixed` and flex column wrapping
+are now implemented. These are tracked in [ROADMAP.md](ROADMAP.md).
 
 NexiumX is a work in progress and does **not** claim web-platform compatibility.
 See "Known limitations" below.
@@ -314,9 +317,11 @@ JavaScript:
 - Timers run during load up to `javascript_max_runtime_ms` (default 2 s);
   very long timeouts are skipped. Animation frames are approximated with a
   16 ms timer.
-- DOM collections are plain arrays (no `NodeList`/`HTMLCollection` methods),
-  and `style` exposes a fixed set of CSS properties plus `cssText`/
-  `setProperty`.
+- DOM collections expose `item`, `forEach`, `keys`, `values`, `entries` and
+  iteration (`querySelectorAll` is static, `childNodes`/`children`/live
+  collections re-query). `style` supports `getPropertyValue`,
+  `getPropertyPriority`, `removeProperty`, `cssText`, `item` and a broad
+  camelCase property set.
 - `MutationObserver` supports `childList`, `attributes`, `characterData`,
   `subtree` and `attributeFilter`; `characterData` is detected by text
   snapshots at delivery time. Callbacks that mutate their own observed subtree
@@ -341,16 +346,17 @@ CSS:
   `calc`/`min`/`max`/`clamp`), orientation, aspect-ratio and
   prefers-color-scheme: light; `print` never matches and resolution queries
   are not implemented.
-- `:hover` matches the current pointer target; `:focus` and other dynamic
-  pseudo-classes never match.
+- `:hover` matches the current pointer target; `:focus`, `:focus-visible` and
+  `:focus-within` match the focused element, including script-driven focus.
 - CSS Grid covers explicit/implicit tracks, `repeat()`, `fr`, spans, line
-  placement, auto-placement and gaps; subgrid, named lines/areas, `auto-fit`
-  and dense column flow are not implemented. No floats. Flex wrapping supports
-  rows (column wrap is treated as nowrap); row/column reverse and column
+  placement, auto-placement, gaps and `auto-fit`; subgrid, named lines/areas
+  and dense column flow are not implemented. Floats (`float`/`clear`) wrap
+  inline content beside left/right boxes. Flex wrapping supports rows and
+  columns (with a definite height); row/column reverse and column
   `justify-content` are supported.
 - Tables implement rows, cells, colspan, rowspan, border-spacing, collapsed
-  borders, captions and cell stretching; `table-layout: fixed` is not
-  implemented.
+  borders, captions and cell stretching; `table-layout: fixed` distributes
+  `<col>`/first-row widths with even sharing of unspecified columns.
 - Margin collapsing covers sibling and parent/child cases for positive margins
   through empty/block containers; empty-block-through and negative-margin edge
   cases are simplified.
@@ -380,8 +386,8 @@ Rendering:
 Browsing and storage:
 
 - Profiles isolate cookies, local storage, history, cache and IndexedDB.
-  Session storage is per tab and only survives through explicit session
-  save/restore; there is no automatic crash recovery.
+  Session storage is per tab and survives explicit session save/restore;
+  API sessions can additionally be persisted to disk for restart recovery.
 - IndexedDB implements `open`/upgrade, object stores, transactions,
   get/put/delete/getAll/count, `autoIncrement`, indexes (including unique
   constraints), cursors, key ranges and compound keys, with JSON-structured
@@ -403,12 +409,15 @@ Control plane:
   `--tls-bind`. HTTP/2 on the server side still requires a TLS terminator.
   Unauthenticated binds outside loopback are refused.
 - Sessions live in memory and are swept when idle (on the next create);
-  profiles, cookies, storage and session snapshots persist through the
-  profile/storage layer, so a restart drops live tabs but can restore saved
-  snapshots. SSRF blocking is opt-in, resolves hostnames, rejects any private
-  resolved address and re-checks each redirect hop, then dials that pinned
-  address for direct connections and proxy tunnels (CONNECT targets the IP;
-  SOCKS5H sends the IP). A malicious proxy can still ignore the tunnel target,
+  with `api_session_persistence_enabled` they are also written to a disk
+  manifest and can be restored across restarts via `restore_persisted_sessions`
+  (or the REST/MCP restore endpoints). Screenshots can opt into an artifact
+  store (`api_artifacts_dir`) that writes the image to disk and returns its
+  path/URL alongside base64. SSRF blocking is opt-in, resolves hostnames,
+  rejects any private resolved address and re-checks each redirect hop, then
+  dials that pinned address for direct connections and proxy tunnels (CONNECT
+  targets the IP; SOCKS5H sends the IP). A malicious proxy can still ignore
+  the tunnel target,
   so sensitive hosts should stay off untrusted proxies.
 - JS `evaluate` is limited by script length and Boa loop-iteration limits, not
   a hard wall-clock kill switch.
@@ -416,7 +425,9 @@ Control plane:
   W3C actions/pointer input, window rect or cookie APIs. CDP support is a
   subset: no DOM tree, Network events, Input dispatch or full Puppeteer-level
   domain coverage.
-- Screenshots are returned as base64 inside JSON. MCP supports JSON-RPC POST,
+- Screenshots are returned as base64 inside JSON; clip coordinates default to
+  the document origin and can be switched to the viewport, and CDP/BiDi clip
+  and format parameters are honored. MCP supports JSON-RPC POST,
   Streamable HTTP (`GET /mcp` SSE stream, `DELETE /mcp`) and the legacy
   `/mcp/sse` transport; stdio remains the recommended local transport.
 
@@ -430,15 +441,17 @@ Interaction:
   elements (links/spans) and follow link/form navigation automatically.
   Pointer hover persists across separate API calls; focus, selection and
   pending navigation may not.
-- Hover drives `:hover` styling and JS events; `:focus` does not yet match.
-  Keyboard text entry supports input/textarea and contenteditable editing with
-  logical selection ranges, but not IME composition.
+- Hover drives `:hover` styling and JS events; `:focus`, `:focus-visible` and
+  `:focus-within` match the focused element. Keyboard text entry supports
+  input/textarea and contenteditable editing with logical selection ranges,
+  but not IME composition.
 - Scrolling changes viewport crops and wheel offsets; scrollbars, scroll
   chaining, smooth scrolling and sticky/fixed repaint semantics are not
   modeled.
 - Accessibility roles/names are inferred heuristically from tags and ARIA
-  attributes; there is no full accessibility-tree conformance, live regions
-  or iframe traversal.
+  attributes but include states and live-region hints, and inline
+  `srcdoc`/raw-content iframes are traversed; there is no full
+  accessibility-tree conformance or external iframe `src` loading.
 
 Networking:
 

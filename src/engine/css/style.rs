@@ -5,17 +5,20 @@ use std::collections::HashMap;
 use super::parser::ComponentValue;
 use super::values::{
     AlignContent, AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BackgroundSizeMode,
-    BorderStyle, BoxSizing, Color, Display, Edges, FlexDirection, FlexWrap, FontStyle,
-    GridAutoFlow, GridPlacement, GridTrack, JustifyContent, Length, LineHeight, ListStyleType,
-    Overflow, PaintColor, Position, TextAlign, TextDecoration, Transform, Viewport, Visibility,
-    WhiteSpace, expand_four, ident, number, parse_color, parse_font_size_keyword, parse_length,
-    parse_lengths, parse_url, percentage, significant,
+    BorderStyle, BoxSizing, Clear, Color, Display, Edges, FlexDirection, FlexWrap, Float,
+    FontStyle, GridAutoFlow, GridPlacement, GridTrack, JustifyContent, Length, LineHeight,
+    ListStyleType, Overflow, PaintColor, Position, TableLayout, TextAlign, TextDecoration,
+    Transform, Viewport, Visibility, WhiteSpace, expand_four, ident, number, parse_color,
+    parse_font_size_keyword, parse_length, parse_lengths, parse_url, percentage, significant,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PropertyId {
     Display,
     Position,
+    Float,
+    Clear,
+    TableLayout,
     Color,
     BackgroundColor,
     BackgroundImage,
@@ -99,6 +102,9 @@ pub enum PropertyId {
 pub enum PropertyValue {
     Display(Display),
     Position(Position),
+    Float(Float),
+    Clear(Clear),
+    TableLayout(TableLayout),
     Color(PaintColor),
     BackgroundColor(PaintColor),
     BackgroundImage(Option<String>),
@@ -245,6 +251,9 @@ const EDGES: [BorderEdge; 4] = [
 pub struct ComputedStyle {
     pub display: Display,
     pub position: Position,
+    pub float: Float,
+    pub clear: Clear,
+    pub table_layout: TableLayout,
     pub color: Color,
     pub background_color: Color,
     pub background_image: Option<String>,
@@ -324,6 +333,9 @@ impl ComputedStyle {
         Self {
             display: Display::Inline,
             position: Position::Static,
+            float: Float::None,
+            clear: Clear::None,
+            table_layout: TableLayout::Auto,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             background_image: None,
@@ -424,6 +436,9 @@ impl ComputedStyle {
         match value {
             PropertyValue::Display(display) => self.display = *display,
             PropertyValue::Position(position) => self.position = *position,
+            PropertyValue::Float(float) => self.float = *float,
+            PropertyValue::Clear(clear) => self.clear = *clear,
+            PropertyValue::TableLayout(layout) => self.table_layout = *layout,
             PropertyValue::Color(color) => self.color = color.resolve(self.color),
             PropertyValue::BackgroundColor(color) => {
                 self.background_color = color.resolve(self.color);
@@ -575,6 +590,36 @@ pub fn expand_declaration(
         "position" => {
             if let Some(position) = sig.iter().find_map(|v| parse_position(v)) {
                 out.push((PropertyId::Position, PropertyValue::Position(position)));
+            }
+        }
+        "float" => {
+            if let Some(float) = sig.iter().find_map(|v| match ident(v)?.as_str() {
+                "left" => Some(Float::Left),
+                "right" => Some(Float::Right),
+                "none" => Some(Float::None),
+                _ => None,
+            }) {
+                out.push((PropertyId::Float, PropertyValue::Float(float)));
+            }
+        }
+        "clear" => {
+            if let Some(clear) = sig.iter().find_map(|v| match ident(v)?.as_str() {
+                "left" => Some(Clear::Left),
+                "right" => Some(Clear::Right),
+                "both" => Some(Clear::Both),
+                "none" => Some(Clear::None),
+                _ => None,
+            }) {
+                out.push((PropertyId::Clear, PropertyValue::Clear(clear)));
+            }
+        }
+        "table-layout" => {
+            if let Some(layout) = sig.iter().find_map(|v| match ident(v)?.as_str() {
+                "fixed" => Some(TableLayout::Fixed),
+                "auto" => Some(TableLayout::Auto),
+                _ => None,
+            }) {
+                out.push((PropertyId::TableLayout, PropertyValue::TableLayout(layout)));
             }
         }
         "color" => {

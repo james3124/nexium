@@ -11,7 +11,7 @@ use super::parser::{ComponentValue, Declaration, Rule, Stylesheet, SupportsCondi
 use super::style::{
     ComputedStyle, ContentPart, ContentValue, PropertyId, PropertyValue, expand_declaration,
 };
-use super::values::Viewport;
+use super::values::{TextAlign, Viewport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Priority {
@@ -173,6 +173,21 @@ impl<'a> StyleResolver<'a> {
             style.apply(*id, value, parent, root_font_size, self.viewport);
         }
 
+        // The legacy `align` attribute is a presentational hint. It overrides
+        // UA defaults (notably inherited `text-align: center`) but never an
+        // author or inline declaration.
+        let author_aligned = winners
+            .get(&PropertyId::TextAlign)
+            .is_some_and(|(_, priority)| priority.origin >= 1);
+        if !author_aligned
+            && let Some(align) = self
+                .doc
+                .get_attribute(node, "align")
+                .and_then(presentational_align)
+        {
+            style.text_align = align;
+        }
+
         style
     }
     /// Compute the style of a `::before`/`::after` pseudo-element.
@@ -282,6 +297,16 @@ impl<'a> StyleResolver<'a> {
 
         resolve_content(&mut style, self.doc, node);
         style
+    }
+}
+
+fn presentational_align(value: &str) -> Option<TextAlign> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Some(TextAlign::Left),
+        "right" => Some(TextAlign::Right),
+        "center" => Some(TextAlign::Center),
+        "justify" => Some(TextAlign::Justify),
+        _ => None,
     }
 }
 

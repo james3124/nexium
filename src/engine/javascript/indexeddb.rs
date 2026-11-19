@@ -2920,6 +2920,16 @@ pub(crate) fn js_to_json(value: &JsValue, context: &mut Context, depth: usize) -
         return Some(Value::String(string.to_std_string_escaped()));
     }
     let object = value.as_object()?;
+    // DOM nodes and callables pull in unbounded graphs of accessors and
+    // prototype properties. Serializing them can stall the runtime; callers
+    // should return a primitive such as outerHTML or textContent instead.
+    if object.is_callable()
+        || object
+            .has_own_property(JsString::from(super::NODE_ID_KEY), context)
+            .unwrap_or(false)
+    {
+        return None;
+    }
     if let Ok(array) = JsArray::from_object(object.clone()) {
         let length = array.length(context).ok()?;
         let mut values = Vec::new();

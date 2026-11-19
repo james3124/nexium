@@ -89,8 +89,9 @@ inspectable DOM.
 - [x] Background repeat/position/size, border radius, solid/dashed/dotted/
       double borders, list markers and basic z-index ordering.
 - [x] Bundled DejaVu Sans/Serif/Mono family selection; synthetic italics.
-- [x] PNG/JPEG output for full-page, viewport and element screenshots;
-      resizing and comparison helpers.
+- [x] PNG/JPEG/WebP output for full-page, viewport and element screenshots,
+      with tunable PNG compression/filter and JPEG quality; resizing and
+      comparison helpers.
 - [x] Responsive layout via width/height, orientation, aspect-ratio and
       color-scheme media queries.
 
@@ -100,11 +101,13 @@ self-contained demo renders flexbox cards, borders, form controls and text to
 
 ### Phase 2 remaining gaps (tracked for later phases)
 
-- Basic CSS Grid now exists (Phase 7), as do reverse flex directions; floats,
-  flex column wrapping, subgrid and full stacking-context semantics remain
-  unimplemented.
-- Table layout now covers rowspan, border-collapse and captions;
-  `table-layout: fixed` and column-width algorithms remain unimplemented.
+- Basic CSS Grid now exists (Phase 7), as do reverse flex directions and
+  `flex-wrap: wrap` with `flex-direction: column` (definite height); floats
+  with basic inline wrapping and `clear` are implemented. Subgrid, named grid
+  lines/areas and full stacking-context semantics remain unimplemented.
+- Table layout now covers rowspan, border-collapse, captions and
+  `table-layout: fixed` with `<col>`/first-row column widths; advanced table
+  algorithms remain future work.
 - Transforms, transitions, animations and box shadows are not implemented
   (targets for Phase 7).
 - Pseudo-elements other than `::before`/`::after` do not render; generated
@@ -112,7 +115,7 @@ self-contained demo renders flexbox cards, borders, form controls and text to
 - `@namespace` declarations, `min()`/`max()`/`clamp()` and calc/range syntax in
   media queries are implemented; web fonts, advanced SVG/Canvas/video painting
   and full form-control fidelity remain future work. Sticky positioning is
-  static at the rendered scroll position.
+  clamped at the rendered scroll position.
 
 ## Phase 3 — JavaScript (complete)
 
@@ -155,10 +158,13 @@ render the updated DOM.
   layout boxes; `characterData` is detected by snapshot diffing.
 - Fetch is blocking behind a promise with no CORS, streaming bodies or true
   mid-flight abort; XHR is synchronous and minimal.
-- NodeList-style collection methods are not implemented; `style` exposes a
-  fixed property set.
-- File/FormData multipart uploads and history navigation side effects are not
-  implemented.
+- DOM collections expose NodeList-style methods (`item`, `forEach`, `keys`,
+  `values`, `entries`, iteration) with static `querySelectorAll` results and
+  live `childNodes`/`children`/collection results; `style` exposes
+  `getPropertyValue`/`setProperty`/`removeProperty` plus a broad camelCase
+  property set.
+- `FormData` and `File`/`Blob` produce RFC 7578 multipart bodies for `fetch`
+  and `XMLHttpRequest`. History navigation side effects remain unimplemented.
 - Timers are bounded by `javascript_max_runtime_ms` during load.
 
 ## Phase 4 — Browser functionality (complete)
@@ -223,13 +229,17 @@ browser window, using viewport coordinates and live DOM events.
   plus logical selection ranges work. IME composition is not implemented and
   interaction state may not persist across API calls that recreate the page
   session.
-- Hover drives `:hover` styling and JS events; `:focus` does not yet match.
-- Hit testing approximates stacking contexts; scrollbars, scroll chaining,
-  smooth scrolling and sticky/fixed repaint semantics are not modeled.
-- Viewport screenshots are crops of the full-page raster; no incremental
-  repaint or composited layers.
-- Accessibility roles/names are heuristic (ARIA attributes and tag mapping),
-  not a fully conformant accessibility tree; iframes are not traversed.
+- Hover drives `:hover` styling and JS events; `:focus`, `:focus-visible` and
+  `:focus-within` now match the focused element, including script-driven focus.
+- Hit testing approximates stacking contexts; scrollbars, scroll chaining and
+  smooth scrolling are not modeled. Layout now positions fixed boxes and
+  clamps sticky boxes at the rendered scroll offset.
+- Viewport screenshots re-lay out fixed/sticky content at the scroll offset
+  before cropping, with clip regions and output scaling; they remain
+  single-raster crops with no incremental repaint or composited layers.
+- Accessibility roles/names are heuristic but broader (ARIA and tag mapping,
+  states, live-region hints); inline `srcdoc`/raw-content iframes are traversed,
+  external iframe `src` loading is not.
 
 ## Phase 6 — AI integration (complete)
 
@@ -266,9 +276,10 @@ WebSocket or MCP without internal Rust access.
 - MCP supports JSON-RPC POST, Streamable HTTP (`GET /mcp` server stream,
   `DELETE /mcp` session termination) and the legacy SSE transport
   (`GET /mcp/sse` + `POST /mcp/message`); stdio is the local default.
-- Sessions are in memory and lost on restart (profiles and storage persist).
-- Screenshot payloads are base64 JSON and can be large; no streaming or
-  artifact store.
+- API sessions can be persisted to disk and restored across restarts with
+  `api_session_persistence_enabled`; profiles and storage persist independently.
+- Screenshot payloads are base64 JSON by default; an opt-in artifact store can
+  write images under `api_artifacts_dir` and return their path/URL.
 - JS evaluation is bounded by script size and Boa loop limits, not a hard
   wall-clock termination.
 

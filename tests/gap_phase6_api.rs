@@ -3,6 +3,7 @@
 
 mod common;
 
+use common::spawn_test_server;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -625,6 +626,89 @@ async fn mcp_streamable_http_get_stream_delete_and_version_echo() {
     assert!(head.contains("200 ok"), "{head}");
     assert!(head.contains("text/event-stream"), "{head}");
     assert!(head.contains("mcp-session-id:"), "{head}");
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn rest_uses_body_and_query_session_id() {
+    let web = spawn_test_server().await;
+    let (addr, _service, data_dir) = spawn_api(|_| {}).await;
+
+    let created = http(
+        addr,
+        "POST",
+        "/browser/create",
+        None,
+        Some("agent-a"),
+        Some(json!({ "url": format!("http://{web}/interact") })),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    let session = created.body["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let status = http(
+        addr,
+        "GET",
+        &format!("/browser/status?session_id={session}"),
+        None,
+        Some("agent-a"),
+        None,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.body);
+    assert_eq!(status.body["data"]["page"]["title"], "Interact");
+
+    let title = http(
+        addr,
+        "POST",
+        "/browser/evaluate",
+        None,
+        Some("agent-a"),
+        Some(json!({ "script": "document.title", "session_id": session })),
+    )
+    .await;
+    assert_eq!(title.body["data"]["result"], "Interact");
+
+    // Returning a DOM node must serialize to null and leave the runtime usable.
+    let node = http(
+        addr,
+        "POST",
+        "/browser/evaluate",
+        None,
+        Some("agent-a"),
+        Some(json!({ "script": "document.body", "session_id": session })),
+    )
+    .await;
+    assert_eq!(node.status, 200, "{}", node.body);
+    assert_eq!(node.body["data"]["result"], Value::Null);
+
+    let after = http(
+        addr,
+        "POST",
+        "/browser/evaluate",
+        None,
+        Some("agent-a"),
+        Some(json!({ "script": "1 + 1", "session_id": session })),
+    )
+    .await;
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(after.body["data"]["result"], json!(2.0));
+
+    let closed = http(
+        addr,
+        "POST",
+        &format!("/browser/close?session_id={session}"),
+        None,
+        Some("agent-a"),
+        None,
+    )
+    .await;
+    assert_eq!(closed.status, 200, "{}", closed.body);
+    assert_eq!(closed.body["data"]["closed"], true);
 
     let _ = std::fs::remove_dir_all(data_dir);
 }

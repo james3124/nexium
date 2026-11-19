@@ -139,12 +139,16 @@ async fn encodes_png_and_jpeg() {
     std::fs::create_dir_all(&dir).unwrap();
     let png_path = dir.join("shot.png");
     let jpg_path = dir.join("shot.jpg");
+    let webp_path = dir.join("shot.webp");
     rendered.save(&png_path).unwrap();
     rendered.save(&jpg_path).unwrap();
+    rendered.save(&webp_path).unwrap();
     assert!(std::fs::metadata(&png_path).unwrap().len() > 50);
     assert!(std::fs::metadata(&jpg_path).unwrap().len() > 50);
+    assert!(std::fs::metadata(&webp_path).unwrap().len() > 50);
     let _ = std::fs::remove_file(png_path);
     let _ = std::fs::remove_file(jpg_path);
+    let _ = std::fs::remove_file(webp_path);
 }
 
 #[tokio::test]
@@ -170,6 +174,85 @@ async fn renders_data_url_images() {
         (rect.y + 10.0) as u32,
     );
     assert_eq!(center, Rgba([255, 0, 0, 255]), "image rect {rect:?}");
+}
+
+#[tokio::test]
+async fn fixed_boxes_follow_the_scroll_in_viewport_shots() {
+    let html = "<style>body{margin:0;background:#fff}#page{height:1200px;background:#fff}#fixed{position:fixed;top:0;left:0;width:300px;height:40px;background:#ff0000}</style><div id=fixed></div><div id=page></div>";
+    let browser = Browser::new(Config::default());
+    let page = browser.load_html("https://render.test/", html).unwrap();
+    let rendered = browser
+        .render(
+            &page,
+            RenderOptions {
+                viewport: Viewport {
+                    width: 300.0,
+                    height: 200.0,
+                },
+                scroll_y: 500.0,
+                ..RenderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let shot = rendered.viewport_image_at(0.0, 500.0);
+    assert_eq!(shot.dimensions(), (300, 200));
+    assert_eq!(pixel(&shot, 5, 5), Rgba([255, 0, 0, 255]));
+    assert_eq!(pixel(&shot, 5, 100), Rgba([255, 255, 255, 255]));
+}
+
+#[tokio::test]
+async fn sticky_boxes_pin_to_the_viewport_when_scrolled() {
+    let html = "<style>body{margin:0;background:#fff}#before{height:300px;background:#eeeeee}#sticky{position:sticky;top:0;height:40px;background:#0000ff}#after{height:900px}</style><div id=before></div><div id=sticky></div><div id=after></div>";
+    let browser = Browser::new(Config::default());
+    let page = browser.load_html("https://render.test/", html).unwrap();
+    let rendered = browser
+        .render(
+            &page,
+            RenderOptions {
+                viewport: Viewport {
+                    width: 300.0,
+                    height: 200.0,
+                },
+                scroll_y: 400.0,
+                ..RenderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let shot = rendered.viewport_image_at(0.0, 400.0);
+    assert_eq!(pixel(&shot, 5, 5), Rgba([0, 0, 255, 255]));
+}
+
+#[tokio::test]
+async fn viewport_crop_clamps_scroll_past_the_document_end() {
+    let html =
+        "<style>body{margin:0;background:#fff}#tall{height:1200px}</style><div id=tall></div>";
+    let (_, rendered) = render(html, 300.0, 200.0).await;
+    let shot = rendered.viewport_image_at(0.0, 1_000_000.0);
+    assert_eq!(shot.dimensions(), (300, 200));
+    assert_eq!(pixel(&shot, 5, 5), Rgba([255, 255, 255, 255]));
+}
+
+#[tokio::test]
+async fn absolute_overflow_extends_the_document_height() {
+    let html = "<style>body{margin:0;background:#fff}#flow{height:200px}#abs{position:absolute;top:900px;left:0;width:50px;height:60px;background:#ff0000}</style><div id=flow></div><div id=abs></div>";
+    let (_, rendered) = render(html, 300.0, 200.0).await;
+    assert!(rendered.image.height() >= 960);
+    assert_eq!(pixel(&rendered.image, 10, 920), Rgba([255, 0, 0, 255]));
+}
+
+#[tokio::test]
+async fn encodes_webp_and_tuned_png() {
+    let html = "<body style=\"margin:0;background:#00aa00\">hello</body>";
+    let (_, rendered) = render(html, 120.0, 80.0).await;
+    let webp = rendered.webp_bytes().unwrap();
+    assert_eq!(&webp[..4], b"RIFF");
+    assert_eq!(&webp[8..12], b"WEBP");
+    let png = rendered.png_bytes().unwrap();
+    assert_eq!(&png[..4], b"\x89PNG");
 }
 
 #[tokio::test]

@@ -130,6 +130,35 @@ fn canvas_to_data_url_exports_png() {
 }
 
 #[test]
+fn dom_nodes_and_functions_serialize_to_null_without_hanging() {
+    let browser = browser();
+    let page = browser
+        .load_html("https://js.test/", "<body><p id=target>x</p></body>")
+        .unwrap();
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    for script in [
+        "document.body",
+        "document.getElementById('target')",
+        "document.querySelector('p')",
+        "(function(){})",
+    ] {
+        assert_eq!(
+            session.evaluate(script).unwrap(),
+            serde_json::Value::Null,
+            "{script}"
+        );
+    }
+    let value = session.evaluate("1 + 1").unwrap();
+    assert_eq!(value.as_f64(), Some(2.0));
+}
+
+#[test]
 fn adjacent_html_inner_text_and_scripts_collection() {
     let browser = browser();
     let page = browser
@@ -646,6 +675,500 @@ fn import_map_resolves_dynamic_imports() {
     let out = page.select("#out").unwrap().unwrap();
     assert_eq!(page.document.text_content(out), "42");
     assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+}
+
+#[test]
+fn node_types_and_parent_element_are_exposed() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="box"><span id="inner">text</span><!--note--></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    for (script, expected) in [
+        ("document.nodeType", 9.0),
+        ("document.body.nodeType", 1.0),
+        ("document.getElementById('inner').firstChild.nodeType", 3.0),
+        ("document.getElementById('box').lastChild.nodeType", 8.0),
+        ("document.createDocumentFragment().nodeType", 11.0),
+    ] {
+        assert_eq!(
+            session.evaluate(script).unwrap().as_f64(),
+            Some(expected),
+            "{script}"
+        );
+    }
+    assert_eq!(
+        session
+            .evaluate("document.getElementById('inner').parentElement.id")
+            .unwrap()
+            .as_str(),
+        Some("box")
+    );
+    assert_eq!(
+        session
+            .evaluate("document.getElementById('inner').firstChild.parentElement.id")
+            .unwrap()
+            .as_str(),
+        Some("inner")
+    );
+    assert_eq!(
+        session
+            .evaluate("document.documentElement.parentElement")
+            .unwrap(),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn get_elements_by_class_name_requires_all_classes() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="a" class="alpha beta"></div><div id="b" class="alpha"></div><div id="c" class="beta alpha gamma"></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    assert_eq!(
+        session
+            .evaluate(
+                "Array.from(document.getElementsByClassName('alpha beta')).map(function (el) { return el.id; }).join(',')"
+            )
+            .unwrap()
+            .as_str(),
+        Some("a,c")
+    );
+    assert_eq!(
+        session
+            .evaluate("document.body.getElementsByClassName('alpha').length")
+            .unwrap()
+            .as_f64(),
+        Some(3.0)
+    );
+    assert_eq!(
+        session
+            .evaluate("document.getElementsByClassName('missing').length")
+            .unwrap()
+            .as_f64(),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn matches_and_closest_use_the_selector_engine() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="outer" class="wrap"><section id="mid" class="panel"><span id="leaf" class="item">x</span></section></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    for (script, expected) in [
+        (
+            "document.getElementById('leaf').matches('.panel .item')",
+            true,
+        ),
+        (
+            "document.getElementById('leaf').matches('section > span.item')",
+            true,
+        ),
+        (
+            "document.getElementById('leaf').matches('div > span')",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            session.evaluate(script).unwrap().as_bool(),
+            Some(expected),
+            "{script}"
+        );
+    }
+    assert_eq!(
+        session
+            .evaluate("document.getElementById('leaf').closest('.wrap').id")
+            .unwrap()
+            .as_str(),
+        Some("outer")
+    );
+    assert_eq!(
+        session
+            .evaluate("document.getElementById('leaf').closest('span').id")
+            .unwrap()
+            .as_str(),
+        Some("leaf")
+    );
+    assert_eq!(
+        session
+            .evaluate("document.getElementById('leaf').closest('.missing')")
+            .unwrap(),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn clone_node_shallow_and_deep_are_isolated() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="src" data-kind="original"><span class="child">original</span></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var source = document.getElementById('src');
+  var shallow = source.cloneNode(false);
+  shallow.id = 'shallow';
+  var deep = source.cloneNode(true);
+  deep.id = 'deep';
+  deep.querySelector('.child').textContent = 'changed';
+  document.body.appendChild(shallow);
+  document.body.appendChild(deep);
+  return {
+    shallowAttr: shallow.getAttribute('data-kind'),
+    shallowChildren: shallow.childNodes.length,
+    deepAttr: deep.getAttribute('data-kind'),
+    deepText: deep.textContent,
+    originalText: source.textContent,
+    isolated: deep.querySelector('.child') !== source.querySelector('.child'),
+    shallowId: shallow.id
+  };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["shallowAttr"].as_str(), Some("original"));
+    assert_eq!(value["shallowChildren"].as_f64(), Some(0.0));
+    assert_eq!(value["deepAttr"].as_str(), Some("original"));
+    assert_eq!(value["deepText"].as_str(), Some("changed"));
+    assert_eq!(value["originalText"].as_str(), Some("original"));
+    assert_eq!(value["isolated"].as_bool(), Some(true));
+    assert_eq!(value["shallowId"].as_str(), Some("shallow"));
+}
+
+#[test]
+fn replace_child_returns_old_node_and_updates_children() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><ul id="list"><li id="old">old</li><li id="tail">tail</li></ul></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var list = document.getElementById('list');
+  var old = document.getElementById('old');
+  var fresh = document.createElement('li');
+  fresh.id = 'fresh';
+  fresh.textContent = 'fresh';
+  var returned = list.replaceChild(fresh, old);
+  return {
+    returned: returned.id,
+    oldGone: document.getElementById('old') === null,
+    order: Array.from(list.children).map(function (child) { return child.id; }).join(','),
+    text: list.textContent
+  };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["returned"].as_str(), Some("old"));
+    assert_eq!(value["oldGone"].as_bool(), Some(true));
+    assert_eq!(value["order"].as_str(), Some("fresh,tail"));
+    assert_eq!(value["text"].as_str(), Some("freshtail"));
+}
+
+#[test]
+fn document_fragments_move_their_children() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="host"><i id="anchor">a</i></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var fragment = document.createDocumentFragment();
+  var one = document.createElement('b');
+  one.id = 'one';
+  one.textContent = '1';
+  var two = document.createElement('b');
+  two.id = 'two';
+  two.textContent = '2';
+  fragment.appendChild(one);
+  fragment.appendChild(two);
+  var host = document.getElementById('host');
+  host.insertBefore(fragment, host.firstChild);
+  var tail = document.createDocumentFragment();
+  var three = document.createElement('b');
+  three.id = 'three';
+  three.textContent = '3';
+  tail.appendChild(three);
+  host.appendChild(tail);
+  return {
+    order: Array.from(host.children).map(function (child) { return child.id; }).join(','),
+    leftover: fragment.childNodes.length + tail.childNodes.length,
+    text: host.textContent
+  };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["order"].as_str(), Some("one,two,anchor,three"));
+    assert_eq!(value["leftover"].as_f64(), Some(0.0));
+    assert_eq!(value["text"].as_str(), Some("12a3"));
+}
+
+#[test]
+fn create_element_ns_builds_foreign_elements() {
+    let browser = browser();
+    let page = browser
+        .load_html("https://js.test/", "<body></body>")
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.id = 'icon';
+  svg.setAttribute('viewBox', '0 0 10 10');
+  document.body.appendChild(svg);
+  var html = document.createElementNS(null, 'div');
+  var unknown;
+  try {
+    document.createElementNS('urn:unknown', 'x');
+    unknown = 'created';
+  } catch (error) {
+    unknown = 'threw';
+  }
+  return { tag: svg.tagName, htmlTag: html.tagName, outer: svg.outerHTML, unknown: unknown };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["tag"].as_str(), Some("svg"));
+    assert_eq!(value["htmlTag"].as_str(), Some("DIV"));
+    assert!(
+        value["outer"].as_str().unwrap_or("").contains("<svg"),
+        "{value}"
+    );
+    assert!(
+        value["outer"]
+            .as_str()
+            .unwrap_or("")
+            .contains("viewBox=\"0 0 10 10\""),
+        "{value}"
+    );
+    assert_eq!(value["unknown"].as_str(), Some("threw"));
+    let icon = session.page().select("#icon").unwrap().unwrap();
+    assert_eq!(
+        session.page().document.element(icon).unwrap().namespace,
+        nexium::engine::dom::Namespace::Svg
+    );
+    assert!(session.page().script_errors.is_empty());
+}
+
+#[test]
+fn insert_adjacent_text_supports_all_positions() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="host"><span id="target">T</span></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var target = document.getElementById('target');
+  target.insertAdjacentText('beforebegin', 'B');
+  target.insertAdjacentText('afterbegin', 'A');
+  target.insertAdjacentText('beforeend', 'C');
+  target.insertAdjacentText('afterend', 'D');
+  var host = document.getElementById('host');
+  return {
+    text: host.textContent,
+    hostNodes: host.childNodes.length,
+    spanNodes: target.childNodes.length
+  };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["text"].as_str(), Some("BATCD"));
+    assert_eq!(value["hostNodes"].as_f64(), Some(3.0));
+    assert_eq!(value["spanNodes"].as_f64(), Some(3.0));
+}
+
+#[test]
+fn outer_html_setter_replaces_the_element() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body><div id="wrap"><span id="old">old</span></div></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    let value = session
+        .evaluate(
+            r#"(function () {
+  var old = document.getElementById('old');
+  old.outerHTML = '<b id="replacement">new</b>';
+  var detached = document.createElement('div');
+  detached.outerHTML = '<p>ignored</p>';
+  return {
+    oldGone: document.getElementById('old') === null,
+    replacement: document.getElementById('replacement').textContent,
+    wrap: document.getElementById('wrap').textContent,
+    detachedNodes: detached.childNodes.length,
+    detachedHtml: detached.outerHTML
+  };
+})()"#,
+        )
+        .unwrap();
+    assert_eq!(value["oldGone"].as_bool(), Some(true));
+    assert_eq!(value["replacement"].as_str(), Some("new"));
+    assert_eq!(value["wrap"].as_str(), Some("new"));
+    assert_eq!(value["detachedNodes"].as_f64(), Some(0.0));
+    assert_eq!(value["detachedHtml"].as_str(), Some("<div></div>"));
+}
+
+#[test]
+fn dataset_reads_writes_deletes_and_serializes_to_null() {
+    let browser = browser();
+    let page = browser
+        .load_html(
+            "https://js.test/",
+            r#"<body data-user-id="7" data-role="main"></body>"#,
+        )
+        .unwrap();
+    assert!(page.script_errors.is_empty(), "{:?}", page.script_errors);
+    let mut session = nexium::PageSession::new(
+        page,
+        Viewport {
+            width: 640.0,
+            height: 480.0,
+        },
+    );
+    assert_eq!(
+        session
+            .evaluate("document.body.dataset.userId")
+            .unwrap()
+            .as_str(),
+        Some("7")
+    );
+    assert_eq!(
+        session
+            .evaluate("'role' in document.body.dataset")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        session
+            .evaluate(
+                "document.body.dataset.role = 'admin'; document.body.getAttribute('data-role')"
+            )
+            .unwrap()
+            .as_str(),
+        Some("admin")
+    );
+    assert_eq!(
+        session
+            .evaluate("delete document.body.dataset.role; document.body.hasAttribute('data-role')")
+            .unwrap()
+            .as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        session
+            .evaluate("Object.keys(document.body.dataset).includes('userId')")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        session.evaluate("document.body.dataset.missing").unwrap(),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        session.evaluate("document.body.dataset").unwrap(),
+        serde_json::Value::Null
+    );
+    assert_eq!(session.evaluate("1 + 1").unwrap().as_f64(), Some(2.0));
+    assert!(session.page().script_errors.is_empty());
 }
 
 #[test]

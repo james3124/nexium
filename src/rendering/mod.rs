@@ -1,6 +1,6 @@
 //! Page rendering and screenshot API (headless, no window system).
 
-mod screenshots;
+pub(crate) mod screenshots;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -30,6 +30,10 @@ pub struct RenderOptions {
     pub viewport: Viewport,
     pub max_height: u32,
     pub load_images: bool,
+    /// Vertical document offset the viewport is scrolled to. Fixed and sticky
+    /// boxes are laid out relative to this offset.
+    pub scroll_x: f32,
+    pub scroll_y: f32,
 }
 
 impl Default for RenderOptions {
@@ -41,6 +45,8 @@ impl Default for RenderOptions {
             },
             max_height: 20_000,
             load_images: true,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
         }
     }
 }
@@ -51,22 +57,33 @@ pub struct RenderedPage {
     pub viewport: Viewport,
 }
 
+/// Save an RGBA image using the format implied by the path extension
+/// (PNG default, JPEG quality 90, lossless WebP).
+pub fn save_image(image: &RgbaImage, path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => screenshots::save_jpeg(image, path, 90),
+        "webp" => screenshots::save_webp(image, path),
+        _ => screenshots::save_png(image, path),
+    }
+}
+
 impl RenderedPage {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("png")
-            .to_ascii_lowercase();
-        match extension.as_str() {
-            "jpg" | "jpeg" => self.save_jpeg(path, 90),
-            _ => self.save_png(path),
-        }
+        save_image(&self.image, path)
     }
 
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<()> {
         screenshots::save_png(&self.image, path.as_ref())
+    }
+
+    pub fn save_webp(&self, path: impl AsRef<Path>) -> Result<()> {
+        screenshots::save_webp(&self.image, path.as_ref())
     }
 
     pub fn save_jpeg(&self, path: impl AsRef<Path>, quality: u8) -> Result<()> {
@@ -75,6 +92,10 @@ impl RenderedPage {
 
     pub fn png_bytes(&self) -> Result<Vec<u8>> {
         screenshots::png_bytes(&self.image)
+    }
+
+    pub fn webp_bytes(&self) -> Result<Vec<u8>> {
+        screenshots::webp_bytes(&self.image)
     }
 
     pub fn jpeg_bytes(&self, quality: u8) -> Result<Vec<u8>> {
@@ -86,15 +107,23 @@ impl RenderedPage {
         self.viewport_image_at(0.0, 0.0)
     }
 
-    /// Crop to the viewport at a scroll offset.
+    /// Crop to the viewport at a scroll offset. The offset is clamped to the
+    /// scrollable range so a stale scroll position cannot turn a viewport
+    /// capture into the whole page or a zero-height strip.
     pub fn viewport_image_at(&self, scroll_x: f32, scroll_y: f32) -> RgbaImage {
-        let x = scroll_x.max(0.0).min(self.image.width() as f32);
-        let y = scroll_y.max(0.0).min(self.image.height() as f32);
+        let image_width = self.image.width() as f32;
+        let image_height = self.image.height() as f32;
+        let x = scroll_x
+            .max(0.0)
+            .min((image_width - self.viewport.width).max(0.0));
+        let y = scroll_y
+            .max(0.0)
+            .min((image_height - self.viewport.height).max(0.0));
         let rect = crate::engine::layout::Rect {
             x,
             y,
-            width: self.viewport.width.min(self.image.width() as f32 - x),
-            height: self.viewport.height.min(self.image.height() as f32 - y),
+            width: self.viewport.width.min(image_width - x).max(1.0),
+            height: self.viewport.height.min(image_height - y).max(1.0),
         };
         screenshots::crop(&self.image, rect).unwrap_or_else(|| self.image.clone())
     }
@@ -152,13 +181,21 @@ pub async fn render_page(
         &page.stylesheets,
         options.viewport,
     );
-    let layout = layout_document(&page.document, &resolver, fonts, &images, Some(&page.url));
+    let layout = crate::engine::layout::layout_document_with_scroll(
+        &page.document,
+        &resolver,
+        fonts,
+        &images,
+        Some(&page.url),
+        (options.scroll_x, options.scroll_y),
+    );
     debug!("fonts+layout in {:?}", started.elapsed());
 
     let width = options.viewport.width.max(1.0).round() as u32;
     let height = layout
         .document_height
         .max(options.viewport.height)
+        .max(options.scroll_y.max(0.0) + options.viewport.height)
         .min(options.max_height as f32)
         .max(1.0)
         .ceil() as u32;

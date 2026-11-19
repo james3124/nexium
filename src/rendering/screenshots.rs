@@ -3,10 +3,16 @@
 use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
-use image::{ExtendedColorType, RgbaImage, imageops};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::codecs::webp::WebPEncoder;
+use image::{ExtendedColorType, ImageEncoder, RgbaImage, imageops};
 
 use crate::engine::layout::Rect;
 use crate::utils::{NxError, Result};
+
+/// Menyoki-style defaults: fast PNG compression with the Sub filter.
+pub(crate) const DEFAULT_PNG_COMPRESSION: CompressionType = CompressionType::Fast;
+pub(crate) const DEFAULT_PNG_FILTER: FilterType = FilterType::Sub;
 
 pub(crate) fn crop(image: &RgbaImage, rect: Rect) -> Option<RgbaImage> {
     let width = image.width() as f32;
@@ -22,9 +28,13 @@ pub(crate) fn crop(image: &RgbaImage, rect: Rect) -> Option<RgbaImage> {
 }
 
 pub(crate) fn save_png(image: &RgbaImage, path: &Path) -> Result<()> {
-    image
-        .save(path)
-        .map_err(|error| NxError::Image(format!("{}: {error}", path.display())))
+    let bytes = png_bytes(image)?;
+    std::fs::write(path, bytes).map_err(NxError::Io)
+}
+
+pub(crate) fn save_webp(image: &RgbaImage, path: &Path) -> Result<()> {
+    let bytes = webp_bytes(image)?;
+    std::fs::write(path, bytes).map_err(NxError::Io)
 }
 
 pub(crate) fn save_jpeg(image: &RgbaImage, path: &Path, quality: u8) -> Result<()> {
@@ -42,11 +52,37 @@ pub(crate) fn save_jpeg(image: &RgbaImage, path: &Path, quality: u8) -> Result<(
 }
 
 pub(crate) fn png_bytes(image: &RgbaImage) -> Result<Vec<u8>> {
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut bytes, image::ImageFormat::Png)
+    png_bytes_with(image, DEFAULT_PNG_COMPRESSION, DEFAULT_PNG_FILTER)
+}
+
+pub(crate) fn png_bytes_with(
+    image: &RgbaImage,
+    compression: CompressionType,
+    filter: FilterType,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    PngEncoder::new_with_quality(&mut bytes, compression, filter)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgba8,
+        )
         .map_err(|error| NxError::Image(error.to_string()))?;
-    Ok(bytes.into_inner())
+    Ok(bytes)
+}
+
+pub(crate) fn webp_bytes(image: &RgbaImage) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    WebPEncoder::new_lossless(&mut bytes)
+        .encode(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| NxError::Image(error.to_string()))?;
+    Ok(bytes)
 }
 
 pub(crate) fn jpeg_bytes(image: &RgbaImage, quality: u8) -> Result<Vec<u8>> {

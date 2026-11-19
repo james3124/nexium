@@ -53,6 +53,16 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     }
     let service = ApiService::new(config.clone());
+    if config.api_session_persistence_enabled {
+        if let Err(error) = service.restore_persisted_sessions(None).await {
+            tracing::warn!("failed to restore persisted API sessions: {error}");
+        } else {
+            tracing::info!(
+                "restored persisted API sessions from {}",
+                config.data_dir.display()
+            );
+        }
+    }
     match (tls, config.api_tls_bind.as_deref()) {
         (Some(acceptor), Some(tls_bind)) => {
             let http_listener = tokio::net::TcpListener::bind(&config.api_bind)

@@ -13,6 +13,7 @@ use crate::engine::css::{
     BorderStyle, Color, ComputedStyle, Display, FontStyle, Length, Overflow, Position, TextAlign,
     Viewport, Visibility, WhiteSpace,
 };
+use crate::engine::dom::selectors::{focus_target, set_focus_target};
 use crate::engine::dom::{Document, NodeId};
 use crate::engine::javascript::{
     ScriptOptions, ScriptRunResult, SessionEvent, run_page_scripts_inline_persistent,
@@ -166,6 +167,20 @@ pub struct AccessibilityNode {
     pub checked: Option<bool>,
     pub expanded: Option<bool>,
     pub children: Vec<AccessibilityNode>,
+    /// Source tag of the node (useful for agents when the role is generic).
+    pub tag: Option<String>,
+    /// Whether this node is the current focus target.
+    pub focused: bool,
+    /// Whether this node can receive focus (native or via `tabindex`/ARIA).
+    pub focusable: bool,
+    /// `aria-selected` (or `<option selected>`) state when applicable.
+    pub selected: Option<bool>,
+    /// Live-region politeness hint (`off`, `polite`, `assertive`) when present.
+    pub live: Option<String>,
+    /// Heading level (`<h1>`–`<h6>` or `aria-level`), when applicable.
+    pub level: Option<u32>,
+    /// `aria-invalid` state when present.
+    pub invalid: Option<bool>,
 }
 
 pub struct PageSession {
@@ -178,6 +193,7 @@ pub struct PageSession {
     session_storage: HashMap<String, String>,
     hovered: Option<NodeId>,
     focus: Option<NodeId>,
+    focus_visible: bool,
     selection: Option<SelectionRange>,
     pending_navigation: Option<Navigation>,
 }
@@ -186,6 +202,9 @@ impl PageSession {
     pub fn new(page: Page, viewport: Viewport) -> Self {
         let viewport = normalized_viewport(viewport);
         let hovered = page.document.hover_target();
+        // Focus is thread-local in the selector engine; do not leak a stale
+        // target from an earlier session into this document's first layout.
+        set_focus_target(None, false);
         let mut session = Self {
             layout: layout_page(&page, viewport),
             page,
@@ -196,6 +215,7 @@ impl PageSession {
             session_storage: HashMap::new(),
             hovered,
             focus: None,
+            focus_visible: false,
             selection: None,
             pending_navigation: None,
         };
@@ -210,8 +230,11 @@ impl PageSession {
                 .page
                 .apply_session_snapshot(snapshot.result, snapshot.document);
             session.apply_hover_target();
+            session.install_focus_probe();
+            session.sync_focus_from_dom();
             session.relayout();
         }
+        session.apply_focus_target();
         session.publish_layout();
         session
     }
@@ -397,6 +420,8 @@ impl PageSession {
             && self.is_focusable(node)
         {
             self.focus = Some(node);
+            // Pointer focus does not normally show a focus-visible ring.
+            self.focus_visible = false;
         }
         if self.page.script_session().is_none() {
             self.fallback_default_click(target);
@@ -749,6 +774,7 @@ impl PageSession {
         self.scroll_y = 0.0;
         self.hovered = None;
         self.focus = None;
+        self.focus_visible = false;
         self.selection = None;
         self.pending_navigation = None;
         self.relayout();
@@ -764,14 +790,23 @@ impl PageSession {
             .evaluate(code)
             .ok_or_else(|| NxError::Browser("script runtime stopped".to_owned()))?;
         self.apply_snapshot(snapshot.result, snapshot.document);
+        // Scripts may call `element.focus()`; the focus probe records the new
+        // target on the document so we can mirror it into `:focus` matching.
+        let changed = self.sync_focus_from_dom();
+        if changed {
+            self.relayout();
+        }
         value.map_err(NxError::Browser)
     }
 
     pub fn accessibility_tree(&self) -> AccessibilityNode {
         let document = &self.page.document;
+        let focus = self.focus.or_else(focus_target);
         let mut children = Vec::new();
         for child in document.children(document.document_node()) {
-            if let Some(node) = build_accessibility_node(document, &self.layout, *child) {
+            if let Some(node) =
+                build_accessibility_node(document, Some(&self.layout), *child, focus, false)
+            {
                 children.push(node);
             }
         }
@@ -785,6 +820,13 @@ impl PageSession {
             checked: None,
             expanded: None,
             children,
+            tag: Some("document".to_owned()),
+            focused: false,
+            focusable: false,
+            selected: None,
+            live: None,
+            level: None,
+            invalid: None,
         }
     }
 
@@ -811,13 +853,25 @@ impl PageSession {
                 viewport: self.viewport,
                 max_height: 20_000,
                 load_images: true,
+                ..Default::default()
             },
         )
         .await
     }
 
     pub async fn viewport_image(&self, client: &HttpClient) -> Result<RgbaImage> {
-        let rendered = self.screenshot(client).await?;
+        let rendered = render_page(
+            &self.page,
+            client,
+            RenderOptions {
+                viewport: self.viewport,
+                max_height: 20_000,
+                load_images: true,
+                scroll_x: self.scroll_x,
+                scroll_y: self.scroll_y,
+            },
+        )
+        .await?;
         Ok(rendered.viewport_image_at(self.scroll_x, self.scroll_y))
     }
 
@@ -855,6 +909,96 @@ impl PageSession {
             self.hovered = None;
         }
         self.page.document.set_hover_target(self.hovered);
+    }
+
+    /// Publish the current focus target to the selector engine before layout
+    /// so `:focus`, `:focus-visible` and `:focus-within` match the right node.
+    fn apply_focus_target(&mut self) {
+        if let Some(node) = self.focus
+            && !self
+                .page
+                .document
+                .try_node(node)
+                .is_some_and(|candidate| candidate.is_element())
+        {
+            self.focus = None;
+            self.focus_visible = false;
+        }
+        set_focus_target(self.focus, self.focus_visible);
+    }
+
+    /// Install a document-level `focusin`/`focusout` probe inside the script
+    /// runtime. It mirrors script-driven focus (`element.focus()`, clicks and
+    /// keyboard focus) into a DOM attribute that survives the snapshot, since
+    /// the JavaScript runtime lives on a different thread from style layout.
+    fn install_focus_probe(&mut self) {
+        let Some(runtime) = self.page.script_session() else {
+            return;
+        };
+        let code = r#"(function(){
+  try {
+    var root = document.documentElement;
+    if (!root || root.getAttribute('data-nexium-focus-probe')) return;
+    root.setAttribute('data-nexium-focus-probe', '1');
+    function record(target) {
+      try {
+        var id = (target && target.__nexium_node_id != null) ? target.__nexium_node_id : -1;
+        if (document.documentElement) {
+          document.documentElement.setAttribute('data-nexium-focus', String(id));
+        }
+      } catch (err) {}
+    }
+    document.addEventListener('focusin', function (e) { record(e.target); }, true);
+    document.addEventListener('focusout', function () { record(null); }, true);
+    // `element.focus()`/`blur()` are not native bindings yet. Mirror them so
+    // script-driven focus participates in `:focus` styling.
+    try {
+      var proto = Object.getPrototypeOf(root);
+      if (proto && !proto.focus) {
+        proto.focus = function () {
+          try {
+            if (this && this.__nexium_node_id != null) { record(this); }
+          } catch (err) {}
+        };
+        proto.blur = function () {
+          try { record(null); } catch (err) {}
+        };
+      }
+    } catch (err) {}
+  } catch (err) {}
+})()"#;
+        if let Some((_, snapshot)) = runtime.evaluate(code) {
+            self.apply_snapshot(snapshot.result, snapshot.document);
+        }
+    }
+
+    /// Read the focus probe back from the (possibly script-updated) document.
+    /// Returns `true` when the focus target changed.
+    fn sync_focus_from_dom(&mut self) -> bool {
+        let index = self
+            .page
+            .document
+            .descendants(self.page.document.document_node())
+            .into_iter()
+            .find(|&node| self.page.document.tag_name(node) == Some("html"))
+            .and_then(|root| self.page.document.get_attribute(root, "data-nexium-focus"))
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        let next = index.and_then(|index| {
+            let node = NodeId::from_index(index);
+            self.page
+                .document
+                .try_node(node)
+                .is_some_and(|candidate| candidate.is_element())
+                .then_some(node)
+        });
+        if next == self.focus {
+            return false;
+        }
+        self.focus = next;
+        // Script/probe-driven focus is treated as focus-visible by default.
+        self.focus_visible = next.is_some();
+        self.selection = None;
+        true
     }
 
     fn is_focusable(&self, node: NodeId) -> bool {
@@ -937,6 +1081,8 @@ impl PageSession {
             self.dispatch(session_event("focusout", Some(previous), true, false));
         }
         self.focus = node;
+        // Programmatic/keyboard focus is treated as focus-visible.
+        self.focus_visible = node.is_some();
         self.selection = None;
         if let Some(node) = node {
             self.dispatch(session_event("focus", Some(node), false, false));
@@ -1277,6 +1423,7 @@ impl PageSession {
     }
 
     fn relayout(&mut self) {
+        self.apply_focus_target();
         self.layout = layout_page(&self.page, self.viewport);
         self.publish_layout();
     }
@@ -1851,11 +1998,15 @@ fn input_type(document: &Document, node: NodeId) -> String {
         .to_ascii_lowercase()
 }
 
+/// Explicit ARIA roles win; when several tokens are given the first valid one
+/// is used. Known tag mappings fill in the rest.
 fn role_for(document: &Document, node: NodeId) -> Option<String> {
     if let Some(role) = document.get_attribute(node, "role") {
-        let role = role.trim();
-        if !role.is_empty() {
-            return Some(role.to_owned());
+        if let Some(first) = role
+            .split_ascii_whitespace()
+            .find(|token| !token.is_empty())
+        {
+            return Some(first.to_ascii_lowercase());
         }
     }
     let tag = document.tag_name(node)?;
@@ -1867,22 +2018,34 @@ fn role_for(document: &Document, node: NodeId) -> Option<String> {
                 "generic"
             }
         }
-        "button" => "button",
+        "button" | "summary" => "button",
         "input" => match input_type(document, node).as_str() {
             "checkbox" => "checkbox",
             "radio" => "radio",
             "submit" | "button" | "reset" | "image" => "button",
             "range" => "slider",
             "search" => "searchbox",
+            "number" => "spinbutton",
+            "email" | "tel" | "url" | "text" | "password" => "textbox",
             "hidden" => "none",
             _ => "textbox",
         },
         "textarea" => "textbox",
-        "select" => "combobox",
+        "select" => {
+            if document
+                .get_attribute(node, "multiple")
+                .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
+            {
+                "listbox"
+            } else {
+                "combobox"
+            }
+        }
         "option" => "option",
+        "datalist" => "listbox",
         "img" => "img",
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
-        "ul" | "ol" => "list",
+        "ul" | "ol" | "menu" => "list",
         "li" => "listitem",
         "table" => "table",
         "thead" | "tbody" | "tfoot" => "rowgroup",
@@ -1898,13 +2061,98 @@ fn role_for(document: &Document, node: NodeId) -> Option<String> {
         "section" => "region",
         "article" => "article",
         "dialog" => "dialog",
+        "details" => "group",
         "p" => "paragraph",
         "label" => "label",
+        "progress" => "progressbar",
+        "meter" => "meter",
+        "output" => "status",
+        "iframe" | "frame" => "iframe",
+        "hr" => "separator",
+        "canvas" => "img",
+        "video" | "audio" => "group",
         "html" => "document",
         "body" => "generic",
         _ => "generic",
     };
     Some(role.to_owned())
+}
+
+/// Whether `node` can receive keyboard focus, from native semantics,
+/// `tabindex`, `contenteditable` or an ARIA widget role.
+fn focusable_for(document: &Document, node: NodeId) -> bool {
+    if element_disabled(document, node) {
+        return false;
+    }
+    if document.get_attribute(node, "tabindex").is_some() {
+        return true;
+    }
+    if document
+        .get_attribute(node, "contenteditable")
+        .is_some_and(|value| !value.trim().eq_ignore_ascii_case("false"))
+    {
+        return true;
+    }
+    let tag = document.tag_name(node).unwrap_or("");
+    match tag {
+        "input" => input_type(document, node) != "hidden",
+        "textarea" | "select" | "button" | "summary" | "iframe" => true,
+        "a" | "area" => document.get_attribute(node, "href").is_some(),
+        _ => role_for(document, node).is_some_and(|role| {
+            matches!(
+                role.as_str(),
+                "button"
+                    | "link"
+                    | "checkbox"
+                    | "radio"
+                    | "switch"
+                    | "tab"
+                    | "menuitem"
+                    | "slider"
+                    | "spinbutton"
+                    | "textbox"
+                    | "combobox"
+                    | "listbox"
+                    | "option"
+            )
+        }),
+    }
+}
+
+fn selected_for(document: &Document, node: NodeId) -> Option<bool> {
+    if let Some(value) = document.get_attribute(node, "aria-selected") {
+        return Some(value.eq_ignore_ascii_case("true"));
+    }
+    if document.tag_name(node) == Some("option") {
+        return Some(document.get_attribute(node, "selected").is_some());
+    }
+    None
+}
+
+fn live_for(document: &Document, node: NodeId) -> Option<String> {
+    if let Some(value) = document.get_attribute(node, "aria-live") {
+        let value = value.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "off" | "polite" | "assertive") {
+            return Some(value);
+        }
+    }
+    match role_for(document, node).as_deref() {
+        Some("alert" | "log" | "status") => Some("polite".to_owned()),
+        _ => None,
+    }
+}
+
+fn level_for(document: &Document, node: NodeId) -> Option<u32> {
+    if let Some(value) = document.get_attribute(node, "aria-level") {
+        if let Ok(level) = value.trim().parse() {
+            return Some(level);
+        }
+    }
+    document
+        .tag_name(node)
+        .and_then(|tag| tag.strip_prefix('h'))
+        .and_then(|rest| rest.parse().ok())
+        .filter(|level| *level >= 1 && *level <= 6)
 }
 
 fn accessible_name(document: &Document, node: NodeId) -> Option<String> {
@@ -1938,6 +2186,17 @@ fn accessible_name(document: &Document, node: NodeId) -> Option<String> {
             if !value.is_empty() {
                 return Some(value);
             }
+        }
+    }
+    // Elements carrying an explicit (non-generic) role take their name from
+    // their contents when no naming attribute is present. This covers live
+    // regions, custom widgets and ARIA-only controls such as `role="status"`.
+    if document.get_attribute(node, "role").is_some_and(|role| {
+        role.split_ascii_whitespace()
+            .any(|token| !token.is_empty() && !token.eq_ignore_ascii_case("generic"))
+    }) {
+        if let Some(text) = collapsed_text(document, node) {
+            return Some(text);
         }
     }
     let tag = document.tag_name(node).unwrap_or("");
@@ -1976,6 +2235,17 @@ fn accessible_name(document: &Document, node: NodeId) -> Option<String> {
                 return Some(text);
             }
         }
+        // A `<label>` wrapping the control also provides its accessible name.
+        if let Some(label) = document
+            .ancestors(node)
+            .into_iter()
+            .find(|ancestor| document.tag_name(*ancestor) == Some("label"))
+        {
+            let text = collapse_whitespace(&document.text_content(label));
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
         return document
             .get_attribute(node, "value")
             .map(collapse_whitespace)
@@ -1984,7 +2254,7 @@ fn accessible_name(document: &Document, node: NodeId) -> Option<String> {
     None
 }
 
-fn accessibility_hidden(document: &Document, layout: &LayoutResult, node: NodeId) -> bool {
+fn accessibility_hidden(document: &Document, layout: Option<&LayoutResult>, node: NodeId) -> bool {
     if document
         .get_attribute(node, "aria-hidden")
         .is_some_and(|value| value == "true")
@@ -1995,15 +2265,21 @@ fn accessibility_hidden(document: &Document, layout: &LayoutResult, node: NodeId
     if document.tag_name(node) == Some("input") && input_type(document, node) == "hidden" {
         return true;
     }
-    layout.style(node).is_some_and(|style| {
-        style.display == Display::None || style.visibility == Visibility::Hidden
+    layout.is_some_and(|layout| {
+        layout.style(node).is_some_and(|style| {
+            style.display == Display::None || style.visibility == Visibility::Hidden
+        })
     })
 }
 
+/// Build one accessibility node. `layout` is `None` for documents parsed from
+/// iframe contents, which have no layout boxes in the main page.
 fn build_accessibility_node(
     document: &Document,
-    layout: &LayoutResult,
+    layout: Option<&LayoutResult>,
     node: NodeId,
+    focus: Option<NodeId>,
+    in_iframe: bool,
 ) -> Option<AccessibilityNode> {
     if !document.is_element(node) || accessibility_hidden(document, layout, node) {
         return None;
@@ -2015,21 +2291,46 @@ fn build_accessibility_node(
     ) {
         return None;
     }
+    let role = role_for(document, node).unwrap_or_else(|| "generic".to_owned());
+    let name = accessible_name(document, node);
+
     let mut children = Vec::new();
     for child in document.children(node) {
-        if let Some(child) = build_accessibility_node(document, layout, *child) {
+        if let Some(child) = build_accessibility_node(document, layout, *child, focus, in_iframe) {
             children.push(child);
         }
     }
-    let role = role_for(document, node).unwrap_or_else(|| "generic".to_owned());
-    let name = accessible_name(document, node);
+
+    // Iframe contents are RAWTEXT in the main document. Parse the `srcdoc`
+    // attribute (or the raw text content) as a document and splice its
+    // accessibility subtree in so agents can see inside frames.
+    if matches!(tag, "iframe" | "frame") {
+        let source = document
+            .get_attribute(node, "srcdoc")
+            .map(str::to_owned)
+            .unwrap_or_else(|| document.text_content(node));
+        if !source.trim().is_empty() {
+            let frame_document = crate::engine::html::parse_html(&source);
+            for child in frame_document.children(frame_document.document_node()) {
+                if let Some(child) =
+                    build_accessibility_node(&frame_document, None, *child, None, true)
+                {
+                    children.push(child);
+                }
+            }
+        }
+    }
+
     if role == "generic" && name.is_none() && children.is_empty() {
         return None;
     }
+
     let value = match tag {
         "input" => document.get_attribute(node, "value").map(str::to_owned),
         "textarea" => collapsed_text(document, node),
-        _ => None,
+        _ => document
+            .get_attribute(node, "aria-valuetext")
+            .map(str::to_owned),
     };
     let checked = if matches!(tag, "input")
         && matches!(input_type(document, node).as_str(), "checkbox" | "radio")
@@ -2038,23 +2339,50 @@ fn build_accessibility_node(
             document.get_attribute(node, "checked").is_some()
                 || document
                     .get_attribute(node, "aria-checked")
-                    .is_some_and(|value| value == "true"),
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true")),
         )
+    } else if matches!(role.as_str(), "checkbox" | "radio" | "switch") {
+        document
+            .get_attribute(node, "aria-checked")
+            .map(|value| value.eq_ignore_ascii_case("true"))
+    } else if role == "option" {
+        Some(selected_for(document, node).unwrap_or(false))
     } else {
         None
     };
     let expanded = document
         .get_attribute(node, "aria-expanded")
-        .map(|value| value == "true");
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .or_else(|| {
+            if tag == "details" {
+                Some(document.get_attribute(node, "open").is_some())
+            } else {
+                None
+            }
+        });
+    let focused = !in_iframe && focus == Some(node);
+
     Some(AccessibilityNode {
         node: node.index(),
         role,
         name,
-        description: document.get_attribute(node, "title").map(str::to_owned),
+        description: document
+            .get_attribute(node, "aria-description")
+            .or_else(|| document.get_attribute(node, "title"))
+            .map(str::to_owned),
         value,
         disabled: element_disabled(document, node),
         checked,
         expanded,
         children,
+        tag: Some(tag.to_owned()),
+        focused,
+        focusable: focusable_for(document, node),
+        selected: selected_for(document, node),
+        live: live_for(document, node),
+        level: level_for(document, node),
+        invalid: document
+            .get_attribute(node, "aria-invalid")
+            .map(|value| value.eq_ignore_ascii_case("true")),
     })
 }

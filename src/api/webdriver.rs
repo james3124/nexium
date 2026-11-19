@@ -213,9 +213,8 @@ pub(crate) async fn screenshot(
     };
     let options = ScreenshotOptions {
         format: Some("png".to_owned()),
-        quality: None,
         full_page: Some(false),
-        element: None,
+        ..Default::default()
     };
     map_value(
         service.screenshot(&auth, Some(&session), options).await,
@@ -628,7 +627,10 @@ pub(crate) async fn switch_window(
         return api_error_response(ApiError::unauthorized("missing bearer token"));
     };
     let tab_id = body.handle.parse::<u64>().ok();
-    let options = TabsTargetOptions { tab_id };
+    let options = TabsTargetOptions {
+        tab_id,
+        session_id: None,
+    };
     map_value(
         service.tabs_switch(&auth, Some(&session), options).await,
         |_| Value::Null,
@@ -644,7 +646,10 @@ pub(crate) async fn new_window(
     let Ok(auth) = auth(&service, &headers) else {
         return api_error_response(ApiError::unauthorized("missing bearer token"));
     };
-    let options = TabsCreateOptions { url: None };
+    let options = TabsCreateOptions {
+        url: None,
+        session_id: None,
+    };
     map_value(
         service.tabs_create(&auth, Some(&session), options).await,
         |value| {
@@ -744,7 +749,10 @@ pub(crate) async fn execute_sync(
         return api_error_response(ApiError::unauthorized("missing bearer token"));
     };
     let script = format!("(function(){{{}}})()", body.script);
-    let options = EvaluateOptions { script };
+    let options = EvaluateOptions {
+        script,
+        session_id: None,
+    };
     map_value(
         service.evaluate(&auth, Some(&session), options).await,
         |value| value.get("result").cloned().unwrap_or(Value::Null),

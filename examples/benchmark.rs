@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         viewport,
         max_height: 20_000,
         load_images: false,
+        ..Default::default()
     };
     let start = Instant::now();
     for _ in 0..iterations {

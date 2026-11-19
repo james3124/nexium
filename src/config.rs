@@ -70,6 +70,22 @@ pub struct Config {
     pub api_ws_rate_limit_per_minute: u32,
     /// Number of API operations kept in the in-memory audit ring buffer.
     pub api_audit_capacity: usize,
+    /// Persist API session metadata (owners, profile, viewport, defaults) to
+    /// disk so sessions can be reloaded after a process restart. Explicit
+    /// `session_save` calls always record metadata regardless of this flag;
+    /// enabling it additionally auto-saves on create and auto-loads on
+    /// startup. Defaults to `false` to preserve the historical in-memory
+    /// behaviour.
+    pub api_session_persistence_enabled: bool,
+    /// Directory for persisted screenshot artifacts. When unset, artifacts are
+    /// written under `<data_dir>/artifacts`.
+    pub api_artifacts_dir: Option<PathBuf>,
+    /// Maximum encoded size of a single persisted screenshot artifact. Larger
+    /// payloads are rejected before writing. Defaults to 50 MiB.
+    pub api_artifact_max_bytes: usize,
+    /// Maximum number of persisted screenshot artifacts kept on disk. Oldest
+    /// files are pruned when the limit is exceeded. `0` disables pruning.
+    pub api_artifact_max_files: usize,
 }
 
 impl Default for Config {
@@ -109,6 +125,10 @@ impl Default for Config {
             api_rate_limit_per_minute: 600,
             api_ws_rate_limit_per_minute: 1200,
             api_audit_capacity: 256,
+            api_session_persistence_enabled: false,
+            api_artifacts_dir: None,
+            api_artifact_max_bytes: 50 * 1024 * 1024,
+            api_artifact_max_files: 200,
         }
     }
 }

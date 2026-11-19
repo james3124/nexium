@@ -54,8 +54,9 @@ Implemented domains/commands:
 - **Target**: `getTargets`, `createTarget`, `closeTarget`,
   `attachToTarget`, `setDiscoverTargets`, `setAutoAttach`,
   `detachFromTarget`
-- **Page**: `enable`, `navigate`, `reload`, `captureScreenshot`,
-  `getLayoutMetrics`, `getFrameTree`, `getNavigationHistory`,
+- **Page**: `enable`, `navigate`, `reload`, `captureScreenshot`
+  (format, quality, `captureBeyondViewport`, document-space `clip` with
+  scale), `getLayoutMetrics`, `getFrameTree`, `getNavigationHistory`,
   `bringToFront`, `setLifecycleEventsEnabled`, `close`
 - **Runtime**: `enable`, `evaluate`, `callFunctionOn` (including
   `objectId` values returned by `DOM.resolveNode`), `getProperties`,
@@ -99,7 +100,8 @@ Implemented modules:
 - **session**: `session.new`, `session.status`, `session.end`, `browser.close`
   (creates/owns an isolated engine session; disconnected sockets close it)
 - **browsingContext**: `getTree`, `create`, `navigate` (wait=complete),
-  `activate`, `close`, `captureScreenshot`
+  `activate`, `close`, `captureScreenshot` (viewport/document `origin`,
+  PNG/JPEG/WebP `format` and `clip`)
 - **script**: `evaluate`, `callFunction`, `getRealms`
 - **network / log**: `network.getCookies`; after navigation emits
   `browsingContext.navigationStarted`, `browsingContext.load`,
