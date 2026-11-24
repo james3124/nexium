@@ -1,6 +1,6 @@
 # NexiumX Development Roadmap and Status
 
-Updated: 2026-11-11
+Updated: 2026-11-24
 
 Legend: `[x]` implemented and tested · `[~]` implemented as a documented subset
 
@@ -218,9 +218,16 @@ multiple tabs, profiles and restored sessions.
       geometry, visibility, viewport intersection and clickability.
 - [x] Accessibility tree extraction (roles, names, values, checked/expanded/
       disabled states) and structured DOM snapshots.
+- [x] Layout-grounded visual index: painted text runs with per-character
+      viewport rectangles (space fragments preserved so phrases spanning
+      inline elements match), visual elements with styling/raster signals,
+      and explainable natural-language ranking.
+- [x] Before/after verification with pixel ratios, changed regions and text
+      diffs, plus optional before/after PNG artifacts.
 
 Deliverable achieved: interact with rendered webpages without a visible
-browser window, using viewport coordinates and live DOM events.
+browser window, using viewport coordinates, live DOM events and visual
+descriptions instead of CSS selectors.
 
 ### Phase 5 remaining gaps (tracked)
 
@@ -240,6 +247,14 @@ browser window, using viewport coordinates and live DOM events.
 - Accessibility roles/names are heuristic but broader (ARIA and tag mapping,
   states, live-region hints); inline `srcdoc`/raw-content iframes are traversed,
   external iframe `src` loading is not.
+- Vision text/element facts are derived from the DOM and layout and remain
+  exact. Canvas/`<img>` text is covered by the opt-in, bounded `glyph` OCR
+  backend (`none` is default; no model weights or GPU); DOM text does not need
+  it. Description ranking uses deterministic `HeuristicLocator` scoring; the
+  `ElementLocator`/`OcrBackend` traits are extension points, but no trained or
+  hosted model backend ships. `vision_act` refuses tied top-two candidates and
+  stale targets. Pixel diffs can see caret blinking or animation; tune
+  `threshold`/`min_pixels`.
 
 ## Phase 6 — AI integration (complete)
 
@@ -250,8 +265,13 @@ browser window, using viewport coordinates and live DOM events.
 - [x] WebSocket `/ws` command transport plus session, navigation, loading,
   console, network, screenshot and interaction events, filtered per agent.
 - [x] Native Rust MCP server over stdio and HTTP: initialize, ping,
-  tools/list and tools/call with all 19 documented browser tools, JSON
-  schemas, descriptions, structured content and tool error results.
+  tools/list and tools/call with all 19 documented `browser_*` tools plus seven
+  `vision_*` tools (`snapshot` alias included in dispatch), JSON schemas,
+  descriptions, structured content and tool error results.
+- [x] Vision REST routes `POST /browser/vision/{snapshot,analyze,extract-text,
+  find-element,click-target,act,compare}` returning the same payload as MCP
+  `structuredContent`, with `vision_enabled` as a master switch and per-request
+  `ocr_backend`/`locator` options (unknown values → 400).
 - [x] Per-agent isolated sessions (`X-Nexium-Session` + `X-Nexium-Agent`),
   profile ownership checks, session limits and bearer-token auth with a
   per-agent token registry, rotation/revocation, rate limiting and audit log;
@@ -374,7 +394,11 @@ limits, cleanup and recovery behavior.
   audit log, MCP tool discovery/execution and SSE transport, WebSocket
   commands/events, CSS Grid geometry, SVG/canvas painting
   (gradients/patterns/text), page WebSockets, Web Workers, modern browser
-  APIs, and stability/security checks for tab limits, idle cleanup,
+  APIs, the vision core/REST/MCP suites (`vision_core_tests`,
+  `vision_api_tests`, `vision_mcp_tests`) plus the OCR/locator/`vision_act`
+  suites (`vision_depth_tests`, `vision_depth_api_tests`; 36 vision tests, 0
+  failed), and stability/security checks
+  for tab limits, idle cleanup,
   session churn, large documents, proxy-pinned SSRF blocking and crash
   recovery — all passing (2 ignored).
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.

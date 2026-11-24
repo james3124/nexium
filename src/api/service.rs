@@ -15,11 +15,14 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use super::hardening::{
     AuditEntry, AuditLog, RateLimiter, TokenInfo, TokenRegistry, constant_time_eq, normalize_agent,
 };
-use crate::browser::{Browser, TabId};
+use crate::browser::{Browser, Page, TabId};
 use crate::engine::dom::{Document, NodeData, NodeId};
+use crate::engine::layout::Rect;
+use crate::intelligence::visual::compare_images;
+use crate::intelligence::{ElementLocator, ElementMatch, GlyphOcr, NoOcr, OcrBackend, VisualIndex};
 use crate::interaction::MouseButton;
 use crate::networking::NetworkEvent;
-use crate::rendering::{RenderOptions, screenshots};
+use crate::rendering::{RenderOptions, RenderedPage, screenshots};
 use crate::storage::{read_locked, write_atomic};
 use crate::utils::NxError;
 
@@ -217,6 +220,109 @@ pub struct SnapshotOptions {
     pub session_id: Option<String>,
 }
 
+/// Options for a visual screenshot plus layout-grounded index.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionOptions {
+    /// Render the whole laid-out document instead of the current viewport.
+    pub full_page: Option<bool>,
+    /// `png` (default), `jpeg`/`jpg` or `webp`.
+    pub format: Option<String>,
+    /// JPEG quality (ignored for PNG/WebP).
+    pub quality: Option<u8>,
+    /// Include `elements` and `text_runs`. Defaults to `true`.
+    pub include_visual: Option<bool>,
+    /// Raster OCR backend used for painted (non-DOM) text: `none` (default) or `glyph`.
+    pub ocr_backend: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_analyze`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionAnalyzeOptions {
+    pub full_page: Option<bool>,
+    /// Optional viewport-space region; only elements intersecting it are
+    /// returned in `clickable_regions`.
+    pub region: Option<ScreenshotClip>,
+    /// Raster OCR backend: `none` (default, no `ocr` field) or `glyph`.
+    pub ocr_backend: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_extract_text`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionTextOptions {
+    /// Optional case-insensitive phrase to locate on screen.
+    pub query: Option<String>,
+    /// Optional viewport-space region used to filter matches and OCR text.
+    pub region: Option<ScreenshotClip>,
+    /// Raster OCR backend: `none` (default) or `glyph`.
+    pub ocr_backend: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_find_element`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionFindOptions {
+    pub description: String,
+    pub top_k: Option<usize>,
+    /// Optional viewport-space region used to constrain candidates.
+    pub region: Option<ScreenshotClip>,
+    /// Element locator: `heuristic`/`default` (default) or another registered name.
+    pub locator: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_click_target`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionClickOptions {
+    pub description: String,
+    /// Actually dispatch the click at the matched viewport coordinates.
+    pub execute: Option<bool>,
+    /// Capture before/after and report a visual diff.
+    pub verify: Option<bool>,
+    pub button: Option<String>,
+    /// Element locator: `heuristic`/`default` (default) or another registered name.
+    pub locator: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_act`: describe an element once, then locate, disambiguate,
+/// scroll into view if needed, act and verify without extra round trips.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionActOptions {
+    pub description: String,
+    /// `click` (default), `hover` or `scroll_into_view`.
+    pub action: Option<String>,
+    /// Capture before/after and report a visual diff. Defaults to `true`.
+    pub verify: Option<bool>,
+    /// Per-channel pixel delta considered a change.
+    pub threshold: Option<u8>,
+    /// Minimum changed pixels before a region is reported.
+    pub min_pixels: Option<u64>,
+    /// Element locator: `heuristic`/`default` (default) or another registered name.
+    pub locator: Option<String>,
+    /// Maximum locate/auto-scroll attempts. Defaults to `2`.
+    pub max_attempts: Option<usize>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `vision_compare`. Actions are performed by the caller (for
+/// example the MCP tool) between two calls; this endpoint only captures.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct VisionCompareOptions {
+    pub threshold: Option<u8>,
+    pub min_pixels: Option<u64>,
+    pub save_artifacts: Option<bool>,
+    pub session_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct EvaluateOptions {
@@ -290,6 +396,39 @@ pub struct ApiService {
     ws_limiter: RateLimiter,
     audit: AuditLog,
     mcp_sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+}
+
+/// One vision capture: the page, its rendered document, and the scroll offset
+/// that produced the viewport view. Kept together so every vision endpoint
+/// builds its `VisualIndex` with identical geometry.
+struct VisionCapture {
+    page: Page,
+    rendered: RenderedPage,
+    scroll: (f32, f32),
+    viewport: crate::engine::css::Viewport,
+    full_page: bool,
+}
+
+impl VisionCapture {
+    fn index(&self) -> VisualIndex<'_> {
+        VisualIndex::new(
+            &self.page.document,
+            &self.rendered.layout,
+            &self.rendered.image,
+            self.viewport,
+            self.scroll,
+        )
+    }
+
+    /// The image represented by this capture (viewport crop unless `full_page`).
+    fn image(&self) -> image::RgbaImage {
+        if self.full_page {
+            self.rendered.image.clone()
+        } else {
+            self.rendered
+                .viewport_image_at(self.scroll.0, self.scroll.1)
+        }
+    }
 }
 
 impl ApiService {
@@ -1566,6 +1705,573 @@ impl ApiService {
         Ok(data)
     }
 
+    fn vision_enabled(&self) -> ApiResult<()> {
+        if self.config.vision_enabled {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request("vision subsystem is disabled"))
+        }
+    }
+
+    /// Resolve an OCR backend name to a static instance. Unknown names are a
+    /// client error rather than a silent fallback to the no-op backend.
+    fn vision_ocr_backend(name: Option<&str>) -> ApiResult<&'static dyn OcrBackend> {
+        static NONE: NoOcr = NoOcr;
+        static GLYPH: std::sync::LazyLock<GlyphOcr> = std::sync::LazyLock::new(GlyphOcr::default);
+        let normalized = name
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty());
+        match normalized.as_deref().unwrap_or("none") {
+            "none" => Ok(&NONE),
+            "glyph" => Ok(&*GLYPH),
+            other => Err(ApiError::bad_request(format!(
+                "invalid ocr_backend {other:?}; valid values: none, glyph"
+            ))),
+        }
+    }
+
+    /// Resolve an element locator name against the intelligence registry.
+    fn vision_locator(name: Option<&str>) -> ApiResult<&'static dyn ElementLocator> {
+        let normalized = name
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty());
+        crate::intelligence::locator(normalized.as_deref()).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "invalid locator {:?}; valid values: heuristic, default",
+                normalized.as_deref().unwrap_or("")
+            ))
+        })
+    }
+
+    /// Resolve a session and capture the current viewport (or full document)
+    /// plus its layout. All vision endpoints use this so image, layout and
+    /// scroll offset always describe the same frame.
+    async fn vision_capture(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        full_page: bool,
+    ) -> ApiResult<(Arc<SessionEntry>, VisionCapture)> {
+        let entry = self.resolve(auth, id).await?;
+        let browser = entry.browser.lock().await;
+        let page = browser
+            .active_page()
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("active tab has no page"))?;
+        let viewport = browser.viewport();
+        let scroll = browser
+            .active_tab()
+            .map(|tab| (tab.scroll_x, tab.scroll_y))
+            .unwrap_or((0.0, 0.0));
+        // Full-page captures render from the origin; viewport captures render
+        // at the current scroll offset so fixed/sticky boxes land correctly.
+        let (render_x, render_y) = if full_page { (0.0, 0.0) } else { scroll };
+        let rendered = browser
+            .render(
+                &page,
+                RenderOptions {
+                    viewport,
+                    scroll_x: render_x,
+                    scroll_y: render_y,
+                    ..RenderOptions::default()
+                },
+            )
+            .await?;
+        let capture = VisionCapture {
+            page,
+            rendered,
+            scroll: if full_page { (0.0, 0.0) } else { scroll },
+            viewport,
+            full_page,
+        };
+        drop(browser);
+        Ok((entry, capture))
+    }
+
+    /// Screenshot fields plus the layout-grounded visual index.
+    pub async fn vision_snapshot(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let (entry, capture) = self
+            .vision_capture(auth, id, options.full_page.unwrap_or(false))
+            .await?;
+        let image = capture.image();
+        let (format, bytes) =
+            encode_vision_image(&image, options.format.as_deref(), options.quality)?;
+        let mut data = json!({
+            "format": format,
+            "width": image.width(),
+            "height": image.height(),
+            "bytes": bytes.len(),
+            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "scroll_x": capture.scroll.0,
+            "scroll_y": capture.scroll.1,
+            "viewport": json!({
+                "width": capture.viewport.width,
+                "height": capture.viewport.height,
+            }),
+        });
+        if options.include_visual.unwrap_or(true) {
+            let index = capture.index();
+            data["elements"] = vision_json(index.elements())?;
+            data["text_runs"] = vision_json(index.text_runs())?;
+        }
+        // OCR is opt-in: the default backend adds no work and keeps existing
+        // responses byte-for-byte compatible.
+        let backend = Self::vision_ocr_backend(options.ocr_backend.as_deref())?;
+        if backend.name() != "none" {
+            let index = capture.index();
+            let region = if capture.full_page {
+                Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: capture.rendered.image.width() as f32,
+                    height: capture.rendered.image.height() as f32,
+                })
+            } else {
+                None
+            };
+            data["ocr"] = vision_json(index.ocr_text(backend, region))?;
+        }
+        self.emit(
+            "screenshot",
+            Some(&entry.id),
+            json!({
+                "format": data["format"],
+                "width": data["width"],
+                "height": data["height"],
+            }),
+        );
+        Ok(data)
+    }
+
+    /// Elements, text runs, clickable regions and a PNG of the current frame.
+    pub async fn vision_analyze(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionAnalyzeOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let (_, capture) = self
+            .vision_capture(auth, id, options.full_page.unwrap_or(false))
+            .await?;
+        let index = capture.index();
+        let region = vision_region(options.region, capture.scroll);
+        let clickable: Vec<&crate::intelligence::VisualElement> = index
+            .elements()
+            .iter()
+            .filter(|element| {
+                element.clickable
+                    && region
+                        .as_ref()
+                        .map_or(true, |rect| vision_intersects(rect, &element.rect))
+            })
+            .collect();
+        let mut data = json!({
+            "elements": vision_json(index.elements())?,
+            "text_runs": vision_json(index.text_runs())?,
+            "clickable_regions": vision_json(clickable)?,
+            "viewport": json!({
+                "width": capture.viewport.width,
+                "height": capture.viewport.height,
+            }),
+            "scroll": json!({ "x": capture.scroll.0, "y": capture.scroll.1 }),
+            "image": encode_png_base64(&capture.image())?,
+        });
+        let backend = Self::vision_ocr_backend(options.ocr_backend.as_deref())?;
+        if backend.name() != "none" {
+            let ocr_region = if capture.full_page && region.is_none() {
+                Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: capture.rendered.image.width() as f32,
+                    height: capture.rendered.image.height() as f32,
+                })
+            } else {
+                region
+            };
+            data["ocr"] = vision_json(index.ocr_text(backend, ocr_region))?;
+        }
+        Ok(data)
+    }
+
+    /// All painted text in reading order, plus optional phrase matches.
+    pub async fn vision_extract_text(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionTextOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let (_, capture) = self.vision_capture(auth, id, false).await?;
+        let index = capture.index();
+        let runs = index.text_runs();
+        // Text runs already include preserved space fragments, so concatenate
+        // first and then normalise whitespace instead of inserting separators.
+        let joined = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+        let text = crate::intelligence::collapse_whitespace(&joined);
+        let region = vision_region(options.region, capture.scroll);
+        let matches = match options
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+        {
+            Some(query) => index
+                .find_text(query)
+                .into_iter()
+                .filter(|found| {
+                    region
+                        .as_ref()
+                        .map_or(true, |rect| vision_intersects(rect, &found.rect))
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        let backend = Self::vision_ocr_backend(options.ocr_backend.as_deref())?;
+        let ocr = index.ocr_text(backend, region);
+        Ok(json!({
+            "text": text,
+            "runs": vision_json(runs)?,
+            "matches": vision_json(matches)?,
+            "ocr": vision_json(ocr)?,
+        }))
+    }
+
+    /// Rank elements by a natural-language description.
+    pub async fn vision_find_element(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionFindOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let description = options.description.trim();
+        if description.is_empty() {
+            return Err(ApiError::bad_request("description must not be empty"));
+        }
+        let locator = Self::vision_locator(options.locator.as_deref())?;
+        let (_, capture) = self.vision_capture(auth, id, false).await?;
+        let index = capture.index();
+        let top_k = options.top_k.unwrap_or(self.config.vision_max_candidates);
+        let matches = index.find_with(
+            locator,
+            description,
+            top_k,
+            vision_region(options.region, capture.scroll),
+        );
+        Ok(json!({ "matches": vision_json(matches)? }))
+    }
+
+    /// Locate the best element for a description and optionally click it.
+    pub async fn vision_click_target(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionClickOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let description = options.description.trim();
+        if description.is_empty() {
+            return Err(ApiError::bad_request("description must not be empty"));
+        }
+        let locator = Self::vision_locator(options.locator.as_deref())?;
+        let (entry, capture) = self.vision_capture(auth, id, false).await?;
+        let index = capture.index();
+        let best = index
+            .find_with(
+                locator,
+                description,
+                self.config.vision_max_candidates,
+                None,
+            )
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::not_found("no visual element matched the description"))?;
+        let (x, y) = best.element.center;
+        let mut data = json!({
+            "x": x,
+            "y": y,
+            "node_id": best.element.node_id,
+            "label": best.element.label,
+            "confidence": best.element.confidence,
+            "score": best.score,
+            "signals": vision_json(best.signals)?,
+        });
+        if options.execute.unwrap_or(false) {
+            let click_result = self
+                .click(
+                    auth,
+                    Some(&entry.id),
+                    ClickOptions {
+                        x: Some(x),
+                        y: Some(y),
+                        button: options.button.clone(),
+                        ..ClickOptions::default()
+                    },
+                )
+                .await?;
+            data["click_result"] = click_result;
+            self.emit(
+                "interaction",
+                Some(&entry.id),
+                json!({ "kind": "vision_click", "x": x, "y": y }),
+            );
+        }
+        if options.verify.unwrap_or(false) {
+            let (_, after) = self.vision_capture(auth, Some(&entry.id), false).await?;
+            let (text_added, text_removed) = index.text_diff(&after.index());
+            let mut comparison = compare_images(
+                &capture.image(),
+                &after.image(),
+                self.config.vision_diff_threshold,
+                self.config.vision_min_diff_pixels,
+            );
+            comparison.text_added = text_added;
+            comparison.text_removed = text_removed;
+            data["verification"] = vision_json(comparison)?;
+        }
+        Ok(data)
+    }
+
+    /// Describe an element once: locate it, refuse ambiguous matches, scroll it
+    /// into view if needed, act, and optionally verify the visual change.
+    pub async fn vision_act(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionActOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let description = options.description.trim();
+        if description.is_empty() {
+            return Err(ApiError::bad_request("description must not be empty"));
+        }
+        let locator = Self::vision_locator(options.locator.as_deref())?;
+        let action = options
+            .action
+            .as_deref()
+            .map(str::trim)
+            .filter(|action| !action.is_empty())
+            .unwrap_or("click")
+            .to_ascii_lowercase();
+        if !matches!(action.as_str(), "click" | "hover" | "scroll_into_view") {
+            return Err(ApiError::bad_request(format!(
+                "invalid action {action:?}; valid values: click, hover, scroll_into_view"
+            )));
+        }
+        let verify = options.verify.unwrap_or(true);
+        let threshold = options
+            .threshold
+            .unwrap_or(self.config.vision_diff_threshold);
+        let min_pixels = options
+            .min_pixels
+            .unwrap_or(self.config.vision_min_diff_pixels);
+        let max_attempts = options.max_attempts.unwrap_or(2).max(1);
+        let top_k = self.config.vision_max_candidates;
+        let (entry, mut capture) = self.vision_capture(auth, id, false).await?;
+        let mut best: Option<ElementMatch> = None;
+
+        for attempt in 0..max_attempts {
+            let chosen = {
+                let index = capture.index();
+                let candidates = index.find_with(locator, description, top_k, None);
+                if let [first, second, ..] = candidates.as_slice()
+                    && (first.score - second.score).abs() <= 0.05
+                    && first.score > 0.5
+                {
+                    return Ok(json!({
+                        "action": action,
+                        "ambiguous": true,
+                        "candidates": vision_json(&candidates)?,
+                        "executed": false,
+                    }));
+                }
+                let chosen = candidates.first().cloned().ok_or_else(|| {
+                    ApiError::not_found("no visual element matched the description")
+                })?;
+                let (x, y) = chosen.element.center;
+                if let Some(hit) = index.element_at_point(x, y)
+                    && !vision_same_target(
+                        &capture.page.document,
+                        hit.node_id,
+                        chosen.element.node_id,
+                    )
+                {
+                    return Ok(json!({
+                        "action": action,
+                        "ambiguous": true,
+                        "reason": "target moved",
+                        "executed": false,
+                    }));
+                }
+                chosen
+            };
+            let (x, y) = chosen.element.center;
+            let viewport = capture.viewport;
+            let offscreen = x < 0.0 || y < 0.0 || x > viewport.width || y > viewport.height;
+            if offscreen && attempt + 1 < max_attempts {
+                self.scroll(
+                    auth,
+                    Some(&entry.id),
+                    ScrollOptions {
+                        dx: Some(x - viewport.width / 2.0),
+                        dy: Some(y - viewport.height / 2.0),
+                        ..ScrollOptions::default()
+                    },
+                )
+                .await?;
+                capture = self.vision_capture(auth, Some(&entry.id), false).await?.1;
+                continue;
+            }
+            best = Some(chosen);
+            break;
+        }
+
+        let best =
+            best.ok_or_else(|| ApiError::not_found("no visual element matched the description"))?;
+        let target = best.element;
+        let (x, y) = target.center;
+        let mut data = json!({
+            "action": action,
+            "target": json!({
+                "x": x,
+                "y": y,
+                "node_id": target.node_id,
+                "label": target.label,
+                "confidence": target.confidence,
+                "score": best.score,
+            }),
+            "ambiguous": false,
+            "executed": true,
+        });
+        match action.as_str() {
+            "click" => {
+                let result = self
+                    .click(
+                        auth,
+                        Some(&entry.id),
+                        ClickOptions {
+                            x: Some(x),
+                            y: Some(y),
+                            ..ClickOptions::default()
+                        },
+                    )
+                    .await?;
+                data["click_result"] = result;
+            }
+            "hover" => {
+                let result = self
+                    .hover(
+                        auth,
+                        Some(&entry.id),
+                        HoverOptions {
+                            x: Some(x),
+                            y: Some(y),
+                            ..HoverOptions::default()
+                        },
+                    )
+                    .await?;
+                data["hover_result"] = result;
+            }
+            "scroll_into_view" => {
+                let result = self
+                    .scroll(
+                        auth,
+                        Some(&entry.id),
+                        ScrollOptions {
+                            dx: Some(x - capture.viewport.width / 2.0),
+                            dy: Some(y - capture.viewport.height / 2.0),
+                            ..ScrollOptions::default()
+                        },
+                    )
+                    .await?;
+                data["scroll_result"] = result;
+            }
+            _ => unreachable!("action was validated above"),
+        }
+        self.emit(
+            "interaction",
+            Some(&entry.id),
+            json!({ "kind": "vision_act", "action": action, "x": x, "y": y }),
+        );
+
+        if verify {
+            let (_, after) = self.vision_capture(auth, Some(&entry.id), false).await?;
+            let mut comparison =
+                compare_images(&capture.image(), &after.image(), threshold, min_pixels);
+            let (text_added, text_removed) = capture.index().text_diff(&after.index());
+            comparison.text_added = text_added;
+            comparison.text_removed = text_removed;
+            let success_hint = comparison.ratio > threshold as f32
+                || !comparison.text_added.is_empty()
+                || !comparison.text_removed.is_empty();
+            let mut verification = vision_json(comparison)?;
+            verification["success_hint"] = json!(success_hint);
+            data["verification"] = verification;
+        }
+        Ok(data)
+    }
+
+    /// Compare two captures taken around a caller-driven action.
+    pub async fn vision_compare(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: VisionCompareOptions,
+    ) -> ApiResult<Value> {
+        self.vision_enabled()?;
+        let (entry, before) = self.vision_capture(auth, id, false).await?;
+        // The action (if any) is driven by the caller between captures; yield
+        // once so queued DOM work from the previous command can settle.
+        tokio::task::yield_now().await;
+        let (_, after) = self.vision_capture(auth, Some(&entry.id), false).await?;
+        let mut comparison = compare_images(
+            &before.image(),
+            &after.image(),
+            options
+                .threshold
+                .unwrap_or(self.config.vision_diff_threshold),
+            options
+                .min_pixels
+                .unwrap_or(self.config.vision_min_diff_pixels),
+        );
+        let (text_added, text_removed) = before.index().text_diff(&after.index());
+        comparison.text_added = text_added;
+        comparison.text_removed = text_removed;
+        let mut data = vision_json(comparison)?;
+        if options
+            .save_artifacts
+            .unwrap_or(self.config.vision_save_artifacts)
+        {
+            let before_bytes = screenshots::png_bytes(&before.image()).map_err(ApiError::from)?;
+            let after_bytes = screenshots::png_bytes(&after.image()).map_err(ApiError::from)?;
+            let safe_id = sanitize_path_component(&entry.id);
+            let (before_path, before_url) = self.save_screenshot_artifact(
+                &before_bytes,
+                "png",
+                Some(&format!("vision-before-{safe_id}")),
+                &entry.id,
+            )?;
+            let (after_path, after_url) = self.save_screenshot_artifact(
+                &after_bytes,
+                "png",
+                Some(&format!("vision-after-{safe_id}")),
+                &entry.id,
+            )?;
+            data["artifacts"] = json!({
+                "before": { "path": before_path.display().to_string(), "url": before_url },
+                "after": { "path": after_path.display().to_string(), "url": after_url },
+            });
+        }
+        Ok(data)
+    }
+
     pub async fn snapshot(
         &self,
         auth: &AuthContext,
@@ -2385,4 +3091,72 @@ fn png_filter(value: Option<&str>) -> FilterType {
         Some("adaptive") => FilterType::Adaptive,
         _ => FilterType::Sub,
     }
+}
+
+fn vision_json<T: Serialize>(value: T) -> ApiResult<Value> {
+    serde_json::to_value(value).map_err(|error| ApiError::internal(error.to_string()))
+}
+
+/// Vision regions are viewport-relative; `VisualIndex` boxes are document-space.
+fn vision_region(clip: Option<ScreenshotClip>, scroll: (f32, f32)) -> Option<Rect> {
+    clip.map(|clip| Rect {
+        x: clip.x + scroll.0,
+        y: clip.y + scroll.1,
+        width: clip.width,
+        height: clip.height,
+    })
+}
+
+fn vision_intersects(clip: &Rect, rect: &crate::intelligence::VisualRect) -> bool {
+    clip.x < rect.x + rect.width
+        && rect.x < clip.x + clip.width
+        && clip.y < rect.y + rect.height
+        && rect.y < clip.y + clip.height
+}
+
+/// Hit-testing returns the outermost element under a point. Wrapper elements
+/// (html/body) are DOM relatives of the intended target, so only an unrelated
+/// hit counts as "the target moved" before an action is dispatched.
+fn vision_same_target(document: &Document, hit: usize, target: usize) -> bool {
+    if hit == target {
+        return true;
+    }
+    let hit_node = NodeId::from_index(hit);
+    let target_node = NodeId::from_index(target);
+    document
+        .ancestors(hit_node)
+        .iter()
+        .any(|node| node.index() == target)
+        || document
+            .ancestors(target_node)
+            .iter()
+            .any(|node| node.index() == hit)
+}
+
+fn encode_vision_image(
+    image: &image::RgbaImage,
+    format: Option<&str>,
+    quality: Option<u8>,
+) -> ApiResult<(String, Vec<u8>)> {
+    let format = format.unwrap_or("png").to_ascii_lowercase();
+    match format.as_str() {
+        "jpeg" | "jpg" => Ok((
+            "jpeg".to_owned(),
+            screenshots::jpeg_bytes(image, quality.unwrap_or(90)).map_err(ApiError::from)?,
+        )),
+        "webp" => Ok((
+            "webp".to_owned(),
+            screenshots::webp_bytes(image).map_err(ApiError::from)?,
+        )),
+        _ => Ok((
+            "png".to_owned(),
+            screenshots::png_bytes_with(image, png_compression(None), png_filter(None))
+                .map_err(ApiError::from)?,
+        )),
+    }
+}
+
+fn encode_png_base64(image: &image::RgbaImage) -> ApiResult<String> {
+    let bytes = screenshots::png_bytes(image).map_err(ApiError::from)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }

@@ -45,6 +45,7 @@ crawlers and AI agents:
 | JavaScript | Boa runtime, DOM/events, ES modules with imports and dynamic `import()`, observers, cookies/storage, IndexedDB, Web Workers |
 | Networking | HTTP/1.1 + HTTP/2 over Rustls, redirects, cookies (SameSite), disk cache with revalidation, CONNECT/SOCKS5 proxies, `no_proxy`, SSRF checks |
 | Interaction | Hit testing, mouse/keyboard events, `:hover`, Tab focus, form submission, contenteditable, accessibility tree, DOM snapshots |
+| Vision | Layout-grounded text runs and element ranking, description-based find/click, phrase lookup and before/after diffs (REST + MCP) |
 | Control plane | REST + WebSocket + MCP (stdio, Streamable HTTP, legacy SSE), per-agent sessions, tokens, rate limits, audit log, native HTTPS |
 
 ## Quick start
@@ -141,6 +142,37 @@ The 19 `browser_*` tools: `browser_create`, `browser_close`,
 `browser_session_save`, `browser_session_restore`, `browser_evaluate`,
 `browser_network`, `browser_status`.
 
+Seven `vision_*` tools add layout-grounded automation: `vision_snapshot`,
+`vision_analyze`, `vision_extract_text`, `vision_find_element`,
+`vision_click_target`, `vision_act` and `vision_compare` (`snapshot` is a
+callable alias of `vision_snapshot`). Find/click by description instead of a
+selector:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"vision_click_target",
+           "arguments":{"description":"green Submit order button","execute":true,"verify":true}}}
+```
+
+`vision_act` does locate → disambiguate → scroll → act → verify in one call:
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call",
+ "params":{"name":"vision_act",
+           "arguments":{"description":"Submit order button","action":"click","verify":true}}}
+```
+
+`action` is `click` (default), `hover` or `scroll_into_view`; tied candidates
+and stale targets return `{ambiguous:true, executed:false}` without acting.
+`vision_snapshot`/`vision_analyze`/`vision_extract_text` accept `ocr_backend`
+(`none` default, `glyph` opt-in for clean painted canvas/`<img>` text) and
+`vision_find_element`/`vision_click_target`/`vision_act` accept `locator`
+(`heuristic`/`default`); unknown values return a 400. `vision_extract_text`
+always includes `ocr: [...]`. Results carry viewport coordinates,
+`confidence`/`signals` and an optional `verification` diff (`ratio`,
+`changed_regions`, `text_added`/`text_removed`, `success_hint`); `vision_compare`
+returns `ratio`, `changed_regions` and text changes.
+
 ### REST control plane
 
 ```bash
@@ -157,8 +189,9 @@ curl -X POST http://127.0.0.1:9222/browser/snapshot \
 Endpoints: `/health`, `/browser/{create,close,status,navigate,back,forward,
 reload,click,type,press,scroll,hover,screenshot,snapshot,extract,evaluate,
 tabs,tabs/create,tabs/close,tabs/switch,session/save,session/restore,network,
-console,dom}`, `/memory` (process RSS/VSZ/threads + system memory), `/ws`,
-`/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
+console,dom}`, `POST /browser/vision/{snapshot,analyze,extract-text,
+find-element,click-target,act,compare}`, `/memory` (process RSS/VSZ/threads +
+system memory), `/ws`, `/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
 adapters share the same engine — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
 
 Responses use `{"ok":true,"data":...}` or structured errors. Authentication
@@ -273,7 +306,7 @@ src/
 ├── interaction/          viewport/scroll, hit testing, input, accessibility
 ├── storage/              atomic filesystem store, profiles
 ├── rendering/            render pipeline + screenshot encode/crop/diff
-└── intelligence/         DOM dumps, visible text
+└── intelligence/         DOM dumps, visible text, layout-grounded vision index
 ```
 
 ## Status and roadmap
@@ -285,6 +318,8 @@ than hidden:
   [docs/STATUS.md](docs/STATUS.md)
 - Phase-by-phase delivery and remaining gaps:
   [docs/ROADMAP.md](docs/ROADMAP.md)
+- Vision design, implementation status and remaining backends:
+  [docs/VISION_PLAN.md](docs/VISION_PLAN.md)
 - npm packaging and release workflow: [docs/NPM.md](docs/NPM.md)
 
 Not implemented yet: CSS transitions/animations, floats, subgrid, named grid

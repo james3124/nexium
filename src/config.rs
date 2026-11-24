@@ -86,6 +86,18 @@ pub struct Config {
     /// Maximum number of persisted screenshot artifacts kept on disk. Oldest
     /// files are pruned when the limit is exceeded. `0` disables pruning.
     pub api_artifact_max_files: usize,
+    /// Enable the layout-grounded vision API surface. When disabled, `/browser/vision/*`
+    /// requests are rejected with `bad_request`.
+    pub vision_enabled: bool,
+    /// Per-channel pixel tolerance used when comparing two captures.
+    pub vision_diff_threshold: u8,
+    /// Minimum number of changed pixels for a region to be reported.
+    pub vision_min_diff_pixels: u64,
+    /// Maximum number of visual candidates returned by `find` when the caller
+    /// does not supply `top_k`.
+    pub vision_max_candidates: usize,
+    /// Persist before/after captures for `vision_compare` by default.
+    pub vision_save_artifacts: bool,
 }
 
 impl Default for Config {
@@ -129,6 +141,11 @@ impl Default for Config {
             api_artifacts_dir: None,
             api_artifact_max_bytes: 50 * 1024 * 1024,
             api_artifact_max_files: 200,
+            vision_enabled: true,
+            vision_diff_threshold: 8,
+            vision_min_diff_pixels: 40,
+            vision_max_candidates: 20,
+            vision_save_artifacts: false,
         }
     }
 }

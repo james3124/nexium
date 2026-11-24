@@ -1,6 +1,6 @@
 # NexiumX — Implementation Status
 
-Updated: 2026-11-11
+Updated: 2026-11-24
 
 This document collects the implementation status, test coverage, known
 limitations and licensing details. Product overview and usage live in
@@ -154,6 +154,18 @@ limitations and licensing details. Product overview and usage live in
   values and checked/expanded/disabled states.
 - Structured DOM snapshots (serialized HTML, visible text, counts,
   viewport and scroll state) suitable for JSON responses.
+- Layout-grounded vision index: painted text runs with per-character viewport
+  rectangles, visual elements with clickability/styling/raster signals, phrase
+  lookup across inline fragments (including preserved space runs), and
+  natural-language element ranking with explainable scores. `ElementLocator` is
+  pluggable (`HeuristicLocator` default, `locator()` registry, `find_with`), and
+  `element_at_point` resolves the deepest element rather than `html`/`body`.
+- Opt-in raster OCR: `OcrBackend` with `NoOcr` (`none`, default) and bounded,
+  template-based `GlyphOcr` (`glyph`) for clean painted text from canvas/`<img>`.
+- Before/after verification: pixel-difference ratio and changed regions, plus
+  semantic text diffs, exposed through the `vision_*` REST/MCP surface. The
+  composite `vision_act` tool chains describe → locate → disambiguate → scroll
+  → act → verify in one call and refuses ambiguous or stale targets.
 
 **Phase 6 — AI integration** is implemented and tested:
 
@@ -167,8 +179,15 @@ limitations and licensing details. Product overview and usage live in
 - Native MCP JSON-RPC server (`nexium --mcp` over stdio, Streamable HTTP at
   `POST /mcp` + `GET /mcp` SSE stream + `DELETE /mcp`, or the legacy SSE
   transport at `GET /mcp/sse` + `POST /mcp/message`) exposing all 19
-  documented `browser_*` tools with descriptions, JSON schemas, structured
-  content and tool-level error reporting.
+  documented `browser_*` tools plus seven `vision_*` tools (and the `snapshot`
+  alias) with descriptions, JSON schemas, structured content and tool-level
+  error reporting.
+- Seven vision REST routes (`POST /browser/vision/{snapshot,analyze,extract-text,
+  find-element,click-target,act,compare}`) sharing payloads with the MCP tools:
+  text finding, description-based element localization, coordinate clicks with
+  optional execution/verification, describe-act-verify, and before/after
+  comparison. `ocr_backend` and `locator` are per-request options on the
+  relevant tools; unknown values return a 400.
 - Multiple isolated agent sessions selected with `X-Nexium-Session`; ownership
   is enforced against `X-Nexium-Agent`, and persistent profile names cannot be
   shared across agents.
@@ -266,9 +285,16 @@ hit testing, click/hover/typing dispatch into live scripts, scrolling,
 accessibility extraction and DOM snapshots, plus REST auth/session isolation,
 MCP tool discovery/execution, WebSocket commands/events, network logging,
 CSS Grid geometry, SVG/canvas painting, page WebSockets, Web Workers and
-modern browser APIs. Networking and script tests use in-process servers; no
-external network access is required. `cargo clippy --all-targets -- -D
-warnings` and `cargo fmt --check` are clean.
+modern browser APIs. The vision suites cover the core visual index, REST
+service routes and all seven MCP tools (including the `snapshot` alias and
+`structuredContent` shapes) against local HTML fixtures.
+`tests/vision_depth_tests.rs` and `tests/vision_depth_api_tests.rs` cover OCR
+backends, the locator registry, index OCR and glyph recognition, and
+`vision_act` over REST/MCP (including ambiguous, auto-scroll and verification
+cases); the combined vision regression is 36 tests passed, 0 failed.
+Networking and script tests use in-process servers; no external network access
+is required.
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
 
 ## Known limitations
 
@@ -430,6 +456,23 @@ Control plane:
   and format parameters are honored. MCP supports JSON-RPC POST,
   Streamable HTTP (`GET /mcp` SSE stream, `DELETE /mcp`) and the legacy
   `/mcp/sse` transport; stdio remains the recommended local transport.
+
+Vision:
+
+- DOM text and element facts come from text/styles and the rendered layout and
+  remain exact. Canvas/`<img>` text needs the opt-in `ocr_backend: "glyph"`
+  (`none` is the default). Glyph OCR is a bounded, template-based recognizer for
+  clean opaque text at moderate/large sizes — no model weights, GPU or VLM; the
+  bounded-working-set / tiling / ordered-merge concepts come from
+  baidu/Unlimited-OCR, not its model or code. Anti-aliased or very small text
+  may be missed.
+- Element localization uses deterministic token/affordance scoring
+  (`HeuristicLocator`) rather than a trained model. `ElementLocator` and
+  `OcrBackend` are pluggable traits, but no model/object-detection backend
+  ships; they remain extension points only. `vision_act` refuses tied top-two
+  candidates and stale targets instead of guessing.
+- Pixel diffs can report caret blinking or animation as a change; tune
+  `threshold`/`min_pixels` or freeze content around the capture.
 
 Interaction:
 

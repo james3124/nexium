@@ -1,0 +1,161 @@
+use fontdue::{Font, FontSettings};
+use image::{Rgba, RgbaImage};
+use nexium::engine::css::Viewport;
+use nexium::intelligence::{GlyphOcr, NoOcr, OcrBackend, VisualIndex, locator};
+use nexium::{Browser, Config, RenderOptions};
+
+fn draw_text(image: &mut RgbaImage, text: &str, x: u32, y: u32, size: f32) {
+    let font = Font::from_bytes(
+        &include_bytes!("../assets/fonts/DejaVuSans.ttf")[..],
+        FontSettings::default(),
+    )
+    .expect("font");
+    let mut pen = x as f32;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, size);
+        for py in 0..metrics.height {
+            for px in 0..metrics.width {
+                let alpha = bitmap[py * metrics.width + px];
+                if alpha > 0 {
+                    let target = image.get_pixel_mut(x + pen as u32 + px as u32, y + py as u32);
+                    let amount = alpha as u16 * 255 / 255;
+                    let value = 255u16.saturating_sub(amount) as u8;
+                    *target = Rgba([value, value, value, 255]);
+                }
+            }
+        }
+        pen += metrics.advance_width;
+    }
+}
+
+async fn blank_index() -> (
+    image::RgbaImage,
+    nexium::engine::layout::LayoutResult,
+    Viewport,
+) {
+    let browser = Browser::new(Config::default());
+    let page = browser
+        .load_html(
+            "https://render.test/",
+            "<body style='margin:0;background:#fff'></body>",
+        )
+        .expect("page");
+    let rendered = browser
+        .render(
+            &page,
+            RenderOptions {
+                viewport: Viewport {
+                    width: 320.0,
+                    height: 120.0,
+                },
+                ..RenderOptions::default()
+            },
+        )
+        .await
+        .expect("render");
+    (
+        RgbaImage::from_pixel(320, 120, Rgba([255, 255, 255, 255])),
+        rendered.layout,
+        rendered.viewport,
+    )
+}
+
+#[tokio::test]
+async fn no_ocr_reports_no_text() {
+    let mut image = RgbaImage::from_pixel(200, 80, Rgba([255, 255, 255, 255]));
+    draw_text(&mut image, "HELLO", 10, 20, 30.0);
+    let results = NoOcr.recognize(
+        &image,
+        nexium::engine::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 80.0,
+        },
+    );
+    assert!(results.is_empty());
+    assert_eq!(NoOcr.name(), "none");
+}
+
+#[tokio::test]
+async fn glyph_ocr_recognises_large_painted_text() {
+    let mut image = RgbaImage::from_pixel(320, 120, Rgba([255, 255, 255, 255]));
+    draw_text(&mut image, "STOP", 20, 30, 36.0);
+    let ocr = GlyphOcr::default();
+    let results = ocr.recognize(
+        &image,
+        nexium::engine::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 120.0,
+        },
+    );
+    assert!(!results.is_empty(), "OCR returned no results");
+    assert!(
+        results.iter().any(|result| result.text.contains("STOP")),
+        "expected STOP, got {:?}",
+        results
+            .iter()
+            .map(|result| result.text.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(results.iter().all(|result| result.source == "ocr"));
+}
+
+#[tokio::test]
+async fn visual_index_exposes_ocr_text_from_an_image() {
+    let (mut image, layout, viewport) = blank_index().await;
+    draw_text(&mut image, "GO", 20, 30, 32.0);
+    let document = nexium::engine::dom::Document::new();
+    let index = VisualIndex::new(&document, &layout, &image, viewport, (0.0, 0.0));
+    let results = index.ocr_text(
+        &GlyphOcr::default(),
+        Some(nexium::engine::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 120.0,
+        }),
+    );
+    assert!(results.iter().any(|result| result.text.contains("G")));
+}
+
+#[tokio::test]
+async fn locator_registry_and_find_with_match_the_default() {
+    assert!(locator(Some("heuristic")).is_some());
+    assert!(locator(Some("default")).is_some());
+    assert!(locator(Some("unknown-model")).is_none());
+
+    let browser = Browser::new(Config::default());
+    let page = browser
+        .load_html(
+            "https://render.test/",
+            "<body style='margin:0;background:#fff'><button id='ok'>OK</button></body>",
+        )
+        .expect("page");
+    let rendered = browser
+        .render(
+            &page,
+            RenderOptions {
+                viewport: Viewport {
+                    width: 300.0,
+                    height: 200.0,
+                },
+                ..RenderOptions::default()
+            },
+        )
+        .await
+        .expect("render");
+    let index = VisualIndex::new(
+        &page.document,
+        &rendered.layout,
+        &rendered.image,
+        rendered.viewport,
+        (0.0, 0.0),
+    );
+    let default = index.find("OK button", 3, None);
+    let via_trait = index.find_with(locator(None).expect("locator"), "OK button", 3, None);
+    assert_eq!(default.len(), via_trait.len());
+    assert_eq!(default[0].element.node_id, via_trait[0].element.node_id);
+}

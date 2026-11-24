@@ -644,6 +644,13 @@ async fn mcp_lists_tools_and_executes_browser_calls() {
         "browser_evaluate",
         "browser_network",
         "browser_status",
+        "vision_snapshot",
+        "vision_analyze",
+        "vision_extract_text",
+        "vision_find_element",
+        "vision_click_target",
+        "vision_act",
+        "vision_compare",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }

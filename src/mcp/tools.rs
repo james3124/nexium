@@ -9,7 +9,9 @@ use serde_json::{Map, Value, json};
 use crate::api::service::{
     ApiError, ApiResult, ApiService, AuthContext, ClickOptions, CreateOptions, EvaluateOptions,
     HoverOptions, PressOptions, ScreenshotOptions, ScrollOptions, SessionOptions, SnapshotOptions,
-    TabsCreateOptions, TabsTargetOptions, TypeOptions, WaitOptions,
+    TabsCreateOptions, TabsTargetOptions, TypeOptions, VisionActOptions, VisionAnalyzeOptions,
+    VisionClickOptions, VisionCompareOptions, VisionFindOptions, VisionOptions, VisionTextOptions,
+    WaitOptions,
 };
 
 #[derive(Deserialize)]
@@ -103,6 +105,34 @@ pub async fn call(
             let args: EvaluateOptions = parse(&arguments)?;
             service.evaluate(auth, session, args).await
         }
+        "vision_snapshot" | "snapshot" => {
+            let args: VisionOptions = parse(&arguments)?;
+            service.vision_snapshot(auth, session, args).await
+        }
+        "vision_analyze" => {
+            let args: VisionAnalyzeOptions = parse(&arguments)?;
+            service.vision_analyze(auth, session, args).await
+        }
+        "vision_extract_text" => {
+            let args: VisionTextOptions = parse(&arguments)?;
+            service.vision_extract_text(auth, session, args).await
+        }
+        "vision_find_element" => {
+            let args: VisionFindOptions = parse(&arguments)?;
+            service.vision_find_element(auth, session, args).await
+        }
+        "vision_click_target" => {
+            let args: VisionClickOptions = parse(&arguments)?;
+            service.vision_click_target(auth, session, args).await
+        }
+        "vision_act" => {
+            let args: VisionActOptions = parse(&arguments)?;
+            service.vision_act(auth, session, args).await
+        }
+        "vision_compare" => {
+            let args: VisionCompareOptions = parse(&arguments)?;
+            service.vision_compare(auth, session, args).await
+        }
         "browser_network" => service.network(auth, session).await,
         "browser_status" => service.status(auth, session).await,
         other => Err(ApiError::not_found(format!("unknown tool: {other}"))),
@@ -167,6 +197,24 @@ fn selector_property(properties: &mut Map<String, Value>) {
         json!({
             "type": "string",
             "description": "CSS selector; overrides coordinates and is scrolled into view."
+        }),
+    );
+}
+
+fn region_property(properties: &mut Map<String, Value>) {
+    properties.insert(
+        "region".to_owned(),
+        json!({
+            "type": "object",
+            "description": "Viewport-space region; only elements or text intersecting it are considered.",
+            "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" },
+                "width": { "type": "number" },
+                "height": { "type": "number" },
+                "scale": { "type": "number", "description": "Output scale factor (default 1)." }
+            },
+            "required": ["width", "height"]
         }),
     );
 }
@@ -502,6 +550,165 @@ pub fn tool_definitions() -> Vec<Value> {
     tools.push(tool(
         "browser_status",
         "Return session status, page metadata, tabs and scroll state.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "full_page".to_owned(),
+        json!({ "type": "boolean", "description": "Render the whole document instead of the viewport (default false)." }),
+    );
+    properties.insert(
+        "format".to_owned(),
+        json!({ "type": "string", "enum": ["png", "jpeg", "jpg", "webp"] }),
+    );
+    properties.insert(
+        "quality".to_owned(),
+        json!({
+            "type": "integer", "minimum": 1, "maximum": 100,
+            "description": "JPEG quality (default 90); ignored for PNG/WebP."
+        }),
+    );
+    properties.insert(
+        "include_visual".to_owned(),
+        json!({ "type": "boolean", "description": "Include layout-grounded elements and text runs (default true)." }),
+    );
+    tools.push(tool(
+        "vision_snapshot",
+        "Capture a screenshot plus a layout-grounded visual index (elements, text runs, scroll and viewport).",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "full_page".to_owned(),
+        json!({ "type": "boolean", "description": "Analyze the whole document instead of the viewport (default false)." }),
+    );
+    region_property(&mut properties);
+    tools.push(tool(
+        "vision_analyze",
+        "Analyze the current frame: elements, text runs, clickable regions, viewport and a PNG image.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "query".to_owned(),
+        json!({ "type": "string", "description": "Optional case-insensitive phrase to locate on screen." }),
+    );
+    region_property(&mut properties);
+    tools.push(tool(
+        "vision_extract_text",
+        "Extract painted text in reading order with boxes, optionally locating a phrase.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "description".to_owned(),
+        json!({ "type": "string", "description": "Natural-language description of the element to locate (required, must not be empty)." }),
+    );
+    properties.insert(
+        "top_k".to_owned(),
+        json!({ "type": "integer", "minimum": 1, "description": "Maximum number of ranked matches to return." }),
+    );
+    region_property(&mut properties);
+    tools.push(required(
+        tool(
+            "vision_find_element",
+            "Rank visual elements by a natural-language description and explain each match with signals.",
+            properties,
+        ),
+        &["description"],
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "description".to_owned(),
+        json!({ "type": "string", "description": "Natural-language description of the element to click (required, must not be empty)." }),
+    );
+    properties.insert(
+        "execute".to_owned(),
+        json!({ "type": "boolean", "description": "Actually dispatch the click at the matched coordinates (default false)." }),
+    );
+    properties.insert(
+        "verify".to_owned(),
+        json!({ "type": "boolean", "description": "Capture before/after and report visual and text differences (default false)." }),
+    );
+    properties.insert(
+        "button".to_owned(),
+        json!({ "type": "string", "enum": ["left", "middle", "right"], "description": "Mouse button used when execute is true." }),
+    );
+    tools.push(required(
+        tool(
+            "vision_click_target",
+            "Resolve a description to viewport coordinates, optionally click it and verify the result.",
+            properties,
+        ),
+        &["description"],
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "description".to_owned(),
+        json!({ "type": "string", "description": "Natural-language description of the element to act on (required, must not be empty)." }),
+    );
+    properties.insert(
+        "action".to_owned(),
+        json!({ "type": "string", "enum": ["click", "hover", "scroll_into_view"], "description": "Action performed at the located element (default click)." }),
+    );
+    properties.insert(
+        "verify".to_owned(),
+        json!({ "type": "boolean", "description": "Capture before/after and report visual and text changes (default true)." }),
+    );
+    properties.insert(
+        "threshold".to_owned(),
+        json!({ "type": "integer", "minimum": 0, "maximum": 255, "description": "Per-channel pixel delta considered a change." }),
+    );
+    properties.insert(
+        "min_pixels".to_owned(),
+        json!({ "type": "integer", "minimum": 0, "description": "Minimum changed pixels before a region is reported." }),
+    );
+    properties.insert(
+        "locator".to_owned(),
+        json!({ "type": "string", "enum": ["heuristic", "default"], "description": "Element locator strategy (default heuristic)." }),
+    );
+    properties.insert(
+        "max_attempts".to_owned(),
+        json!({ "type": "integer", "minimum": 1, "description": "Maximum locate/auto-scroll attempts (default 2)." }),
+    );
+    tools.push(required(
+        tool(
+            "vision_act",
+            "Locate a described element, refuse ambiguous matches, scroll it into view, act and verify the result.",
+            properties,
+        ),
+        &["description"],
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "threshold".to_owned(),
+        json!({ "type": "integer", "minimum": 0, "maximum": 255, "description": "Per-channel pixel delta considered a change." }),
+    );
+    properties.insert(
+        "min_pixels".to_owned(),
+        json!({ "type": "integer", "minimum": 0, "description": "Minimum changed pixels before a region is reported." }),
+    );
+    properties.insert(
+        "save_artifacts".to_owned(),
+        json!({ "type": "boolean", "description": "Persist both captures as PNG artifacts and return their paths/URLs." }),
+    );
+    tools.push(tool(
+        "vision_compare",
+        "Compare two captures around a caller-driven action: pixel ratio, changed regions and text diff.",
         properties,
     ));
 

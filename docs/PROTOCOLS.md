@@ -112,6 +112,82 @@ Implemented modules:
 Not implemented: BiDi `input`, `storage`, `preloadScript`, `intercept`,
 `emulation`, `webExtension`, and auth/permission modules.
 
+## Vision (REST and MCP)
+
+The vision surface returns layout-grounded facts derived from the rendered
+raster and the layout tree. DOM text and element ranking need no model; an
+opt-in, dependency-free raster OCR backend (`ocr_backend: "glyph"`) can also
+read clean painted text from canvas/`<img>`. Every endpoint accepts the
+standard `session_id` (REST body or `X-Nexium-Session` header) and returns the
+same payload as the matching MCP tool's `structuredContent`.
+
+| MCP tool | REST endpoint | Purpose |
+|---|---|---|
+| `vision_snapshot` | `POST /browser/vision/snapshot` | Base64 screenshot plus `elements`, `text_runs`, scroll and viewport. |
+| `vision_analyze` | `POST /browser/vision/analyze` | `elements`, `text_runs`, `clickable_regions`, `viewport`, `scroll` and a PNG `image`. |
+| `vision_extract_text` | `POST /browser/vision/extract-text` | Painted text in reading order, per-character `runs`, optional phrase `matches`. |
+| `vision_find_element` | `POST /browser/vision/find-element` | Rank elements by natural-language `description` with `score` and `signals`. |
+| `vision_click_target` | `POST /browser/vision/click-target` | Description → viewport `(x, y)`; `execute` clicks, `verify` diffs the result. |
+| `vision_act` | `POST /browser/vision/act` | Describe once → locate, refuse ambiguous ties, scroll into view, act (`click`/`hover`/`scroll_into_view`) and verify. |
+| `vision_compare` | `POST /browser/vision/compare` | Pixel `ratio`, `changed_regions`, `text_added`/`text_removed` and optional artifacts. |
+
+Options: `vision_snapshot` takes `full_page`, `format` (`png`/`jpeg`/`jpg`/
+`webp`), `quality` and `include_visual`; `vision_analyze` takes `full_page`
+and an optional viewport `region`; `vision_extract_text` takes an optional
+case-insensitive `query` and `region`; `vision_find_element` requires
+`description` and accepts `top_k`/`region`; `vision_click_target` requires
+`description` and accepts `execute`, `verify` and `button`; `vision_compare`
+accepts `threshold`, `min_pixels` and `save_artifacts`. A `region` is
+`{x, y, width, height, scale?}` in viewport CSS pixels (`width`/`height`
+required). `snapshot` is a callable MCP alias for `vision_snapshot`; it is not
+advertised as a separate tool in `tools/list`.
+
+`vision_snapshot`, `vision_analyze` and `vision_extract_text` accept
+`ocr_backend` (`none` default, `glyph` opt-in; an unknown name is a 400).
+With `glyph`, responses include `ocr: [{text, rect, confidence, source:"ocr"}]`;
+`vision_extract_text` always includes `ocr` (empty with `none`).
+`vision_find_element`, `vision_click_target` and `vision_act` accept `locator`
+(`heuristic`/`default`; an unknown name is a 400). `vision_act` requires
+`description` and also takes `action` (`click` default, `hover`,
+`scroll_into_view`), `verify` (default `true`), `threshold`, `min_pixels` and
+`max_attempts` (default `2`). On success it returns
+`{action, target:{x,y,node_id,label,confidence,score}, ambiguous:false,
+executed:true, verification?}`; `verification` adds
+`{ratio, changed_regions, text_added, text_removed, success_hint}`. When the
+top two candidates tie (score delta <= 0.05 with best > 0.5) or the hit target
+has moved, it returns `{action, ambiguous:true, executed:false}` with
+`candidates` (or `reason: "target moved"`) and performs no action.
+
+Typical agent loop:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"vision_find_element",
+           "arguments":{"description":"green Submit order button","top_k":3}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"vision_click_target",
+           "arguments":{"description":"Submit order button","execute":true,"verify":true}}}
+```
+
+Or do the whole locate/act/verify sequence in one call:
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call",
+ "params":{"name":"vision_act",
+           "arguments":{"description":"Submit order button","action":"click","verify":true}}}
+```
+
+`vision_enabled = false` (config) disables all seven routes/tools with a
+`bad_request` error. `threshold`/`min_pixels` control diff sensitivity, and
+`save_artifacts` persists before/after PNGs under `api_artifacts_dir`. DOM
+text stays exact via the layout index; the opt-in `glyph` OCR backend adds
+painted canvas/`<img>` text (clean opaque text at moderate/large sizes, bounded
+tiles, no model weights/GPU). Element ranking is deterministic heuristics;
+model-backed locators are a trait-only extension point, not a shipped backend.
+
 ## Client compatibility notes
 
 - **Puppeteer**: discovery/target attach, `Page.navigate`, `Runtime.evaluate`
@@ -126,7 +202,9 @@ Not implemented: BiDi `input`, `storage`, `preloadScript`, `intercept`,
 - **Selenium 4**: standard WebDriver commands work; `executeCdpCommand`
   works for the CDP subset above (attach first).
 - **AI agents**: use MCP tools or REST; `GET /browser/dom` returns the full
-  DOM tree with node ids, attributes and children.
+  DOM tree with node ids, attributes and children, and the `vision_*` tools
+  locate text/elements by description and viewport coordinates instead of
+  CSS selectors.
 
 ## Known protocol limitations
 

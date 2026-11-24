@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use super::service::{
     ApiError, ApiResult, ApiService, AuthContext, ClickOptions, CreateOptions, EvaluateOptions,
     HoverOptions, PressOptions, ScreenshotOptions, ScrollOptions, SessionOptions, SnapshotOptions,
-    TabsCreateOptions, TabsTargetOptions, TypeOptions,
+    TabsCreateOptions, TabsTargetOptions, TypeOptions, VisionActOptions, VisionAnalyzeOptions,
+    VisionClickOptions, VisionCompareOptions, VisionFindOptions, VisionOptions, VisionTextOptions,
 };
 use super::websocket;
 use super::{bidi, cdp, webdriver};
@@ -103,6 +104,13 @@ pub fn router(service: Arc<ApiService>) -> Router {
         .route("/browser/scroll", post(scroll))
         .route("/browser/hover", post(hover))
         .route("/browser/screenshot", post(screenshot))
+        .route("/browser/vision/snapshot", post(vision_snapshot))
+        .route("/browser/vision/analyze", post(vision_analyze))
+        .route("/browser/vision/extract-text", post(vision_extract_text))
+        .route("/browser/vision/find-element", post(vision_find_element))
+        .route("/browser/vision/click-target", post(vision_click_target))
+        .route("/browser/vision/act", post(vision_act))
+        .route("/browser/vision/compare", post(vision_compare))
         .route("/browser/snapshot", post(snapshot))
         .route("/browser/extract", post(extract))
         .route("/browser/evaluate", post(evaluate))
@@ -611,6 +619,121 @@ async fn screenshot(
     };
     let session = pick_session(header_session, options.session_id.as_deref());
     respond(service.screenshot(&auth, session.as_deref(), options).await)
+}
+
+async fn vision_snapshot(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_snapshot(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn vision_analyze(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionAnalyzeOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_analyze(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn vision_extract_text(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionTextOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_extract_text(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn vision_find_element(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionFindOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_find_element(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn vision_click_target(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionClickOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_click_target(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn vision_act(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionActOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(service.vision_act(&auth, session.as_deref(), options).await)
+}
+
+async fn vision_compare(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<VisionCompareOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .vision_compare(&auth, session.as_deref(), options)
+            .await,
+    )
 }
 
 async fn snapshot(
