@@ -19,7 +19,10 @@ use crate::browser::{Browser, Page, TabId};
 use crate::engine::dom::{Document, NodeData, NodeId};
 use crate::engine::layout::Rect;
 use crate::intelligence::visual::compare_images;
-use crate::intelligence::{ElementLocator, ElementMatch, GlyphOcr, NoOcr, OcrBackend, VisualIndex};
+use crate::intelligence::{
+    BrowserRepoBackend, ElementLocator, ElementMatch, GitHubApiBackend, GlyphOcr, NoOcr,
+    OcrBackend, RepoBackend, RepoEntry, RepoError, RepoFile, RepoKind, RepoRef, VisualIndex,
+};
 use crate::interaction::MouseButton;
 use crate::networking::NetworkEvent;
 use crate::rendering::{RenderOptions, RenderedPage, screenshots};
@@ -323,6 +326,63 @@ pub struct VisionCompareOptions {
     pub session_id: Option<String>,
 }
 
+/// Options for `repo_open`: a GitHub URL or `owner/repo@ref:path` shorthand.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoOpenOptions {
+    pub url: Option<String>,
+    pub repo: Option<String>,
+    /// Backend name: `github` (default) or `browser`.
+    pub backend: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `repo_list`: list one directory, defaulting to the current path.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoPathOptions {
+    pub path: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `repo_tree`: a capped flat tree, optionally filtered by prefix.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoTreeOptions {
+    pub prefix: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `repo_read`: bounded, line-numbered file content.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoReadOptions {
+    pub path: Option<String>,
+    pub start_line: Option<usize>,
+    pub max_lines: Option<usize>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `repo_search`: local substring search over tree entries.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoSearchOptions {
+    pub query: String,
+    /// When true, return directory paths only (file entries are filtered out).
+    pub paths_only: Option<bool>,
+    pub session_id: Option<String>,
+}
+
+/// Options for `repo_navigate`: a relative/absolute path or URL, or a direction.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RepoNavigateOptions {
+    pub target: String,
+    /// `back` or `forward` walks the session's navigation history.
+    pub direction: Option<String>,
+    pub session_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct EvaluateOptions {
@@ -382,6 +442,64 @@ impl SessionEntry {
     }
 }
 
+/// Repository browsing position and history for one API session.
+#[derive(Clone, Debug)]
+struct RepoNavState {
+    rf: RepoRef,
+    path: String,
+    history: Vec<(RepoRef, String)>,
+    index: usize,
+    /// Backend chosen at open time, reused by every later operation in this
+    /// session so a browser-backed browse never silently switches to GitHub.
+    backend: &'static str,
+}
+
+impl RepoNavState {
+    fn new(rf: RepoRef, backend: &'static str) -> Self {
+        let path = rf.path.clone();
+        Self {
+            history: vec![(rf.clone(), path.clone())],
+            rf,
+            path,
+            index: 0,
+            backend,
+        }
+    }
+
+    /// Record a new location, discarding any forward history.
+    fn push(&mut self, rf: RepoRef) {
+        self.path = rf.path.clone();
+        self.rf = rf.clone();
+        self.history.truncate(self.index + 1);
+        self.history.push((rf, self.path.clone()));
+        self.index = self.history.len() - 1;
+    }
+
+    fn restore(&mut self) {
+        let (rf, path) = self.history[self.index].clone();
+        self.rf = rf;
+        self.path = path;
+    }
+
+    fn undo(&mut self) -> bool {
+        if self.index == 0 {
+            return false;
+        }
+        self.index -= 1;
+        self.restore();
+        true
+    }
+
+    fn redo(&mut self) -> bool {
+        if self.index + 1 >= self.history.len() {
+            return false;
+        }
+        self.index += 1;
+        self.restore();
+        true
+    }
+}
+
 pub struct ApiService {
     config: crate::config::Config,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
@@ -396,6 +514,12 @@ pub struct ApiService {
     ws_limiter: RateLimiter,
     audit: AuditLog,
     mcp_sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+    /// Default repository content backend shared by REST, WebSocket and MCP callers.
+    repo_backend: Arc<dyn RepoBackend>,
+    /// Browser-UI fallback backend, selected with `backend: "browser"`.
+    browser_repo_backend: Arc<dyn RepoBackend>,
+    /// Per-session repository browsing history, keyed by agent and session id.
+    repo_nav: Mutex<HashMap<String, RepoNavState>>,
 }
 
 /// One vision capture: the page, its rendered document, and the scroll offset
@@ -437,6 +561,8 @@ impl ApiService {
         let auth_required = config.api_token.is_some() || !config.api_tokens.is_empty();
         let tokens = TokenRegistry::from_config(&config);
         let audit = AuditLog::new(config.api_audit_capacity);
+        let repo_backend: Arc<dyn RepoBackend> = Arc::new(GitHubApiBackend::new(&config));
+        let browser_repo_backend: Arc<dyn RepoBackend> = Arc::new(BrowserRepoBackend::new(&config));
         Arc::new(Self {
             config,
             sessions: RwLock::new(HashMap::new()),
@@ -451,6 +577,9 @@ impl ApiService {
             ws_limiter: RateLimiter::default(),
             audit,
             mcp_sessions: Mutex::new(HashMap::new()),
+            repo_backend,
+            browser_repo_backend,
+            repo_nav: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2269,6 +2398,310 @@ impl ApiService {
                 "after": { "path": after_path.display().to_string(), "url": after_url },
             });
         }
+        Ok(data)
+    }
+
+    // ---- Repository navigation (REST /browser/repo/*, MCP repo_*) ----------
+
+    /// Select the backend named by the caller: `github` (default) or `browser`.
+    fn repo_backend(&self, name: Option<&str>) -> ApiResult<&dyn RepoBackend> {
+        match name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("github")
+        {
+            "github" => Ok(self.repo_backend.as_ref()),
+            "browser" => Ok(self.browser_repo_backend.as_ref()),
+            other => Err(ApiError::bad_request(format!(
+                "unsupported repository backend {other:?}; supported: github, browser"
+            ))),
+        }
+    }
+
+    fn repo_error(error: RepoError) -> ApiError {
+        let status = match &error {
+            RepoError::BadRequest(_) => 400,
+            RepoError::NotFound(_) => 404,
+            RepoError::RateLimited(_) => 429,
+            RepoError::Upstream(_) => 502,
+        };
+        let code = error.code();
+        let retry_after_ms = error.retry_after_ms();
+        let mut api_error = ApiError::new(status, code, error.to_string());
+        api_error.retry_after_ms = retry_after_ms;
+        api_error
+    }
+
+    fn repo_envelope(rf: &RepoRef, kind: &str, source: &str) -> Value {
+        json!({
+            "repo": format!("{}/{}", rf.owner, rf.repo),
+            "ref": rf.rf,
+            "path": rf.path,
+            "kind": kind,
+            "source": source,
+        })
+    }
+
+    fn repo_merge(data: &mut Value, fields: Value) {
+        if let (Some(target), Some(fields)) = (data.as_object_mut(), fields.as_object()) {
+            for (key, value) in fields {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    fn repo_json<T: Serialize>(value: &T) -> ApiResult<Value> {
+        serde_json::to_value(value).map_err(|error| ApiError::internal(error.to_string()))
+    }
+
+    fn repo_nav_key(&self, auth: &AuthContext, id: Option<&str>) -> String {
+        format!(
+            "{}:{}",
+            auth.agent,
+            id.filter(|id| !id.is_empty()).unwrap_or("default")
+        )
+    }
+
+    fn repo_nav_get(&self, auth: &AuthContext, id: Option<&str>) -> ApiResult<RepoNavState> {
+        let key = self.repo_nav_key(auth, id);
+        self.repo_nav
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::not_found("no repository is open for this session; call repo_open first")
+            })
+    }
+
+    fn repo_nav_set(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        state: RepoNavState,
+    ) -> ApiResult<()> {
+        let key = self.repo_nav_key(auth, id);
+        self.repo_nav
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, state);
+        Ok(())
+    }
+
+    /// Resolve a repository reference, load its metadata and show the root.
+    pub async fn repo_open(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoOpenOptions,
+    ) -> ApiResult<Value> {
+        let backend = self.repo_backend(options.backend.as_deref())?;
+        let input = options
+            .url
+            .or(options.repo)
+            .ok_or_else(|| ApiError::bad_request("url or repo is required"))?;
+        let rf = RepoRef::parse(&input).map_err(Self::repo_error)?;
+        let metadata = backend.metadata(&rf).await.map_err(Self::repo_error)?;
+        let listing = backend
+            .list(&rf, &rf.path)
+            .await
+            .map_err(Self::repo_error)?;
+        let mut data = Self::repo_envelope(&rf, "dir", backend.name());
+        Self::repo_merge(
+            &mut data,
+            json!({
+                "metadata": Self::repo_json(&metadata)?,
+                "entries": listing.entries,
+            }),
+        );
+        self.repo_nav_set(auth, id, RepoNavState::new(rf, backend.name()))?;
+        Ok(data)
+    }
+
+    /// A bounded, flat view of the repository tree, optionally filtered.
+    pub async fn repo_tree(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoTreeOptions,
+    ) -> ApiResult<Value> {
+        let nav = self.repo_nav_get(auth, id)?;
+        let backend = self.repo_backend(Some(nav.backend))?;
+        let prefix = options.prefix.unwrap_or_default();
+        let entries = backend
+            .tree(&nav.rf, &prefix)
+            .await
+            .map_err(Self::repo_error)?;
+        let mut data = Self::repo_envelope(&nav.rf, "tree", backend.name());
+        data["path"] = json!(prefix);
+        Self::repo_merge(&mut data, json!({ "entries": entries, "truncated": false }));
+        Ok(data)
+    }
+
+    /// List one directory (defaults to the current path) and update history.
+    pub async fn repo_list(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoPathOptions,
+    ) -> ApiResult<Value> {
+        let mut nav = self.repo_nav_get(auth, id)?;
+        let backend = self.repo_backend(Some(nav.backend))?;
+        let rf = match options.path.as_deref() {
+            Some(path) if !path.is_empty() => nav.rf.at_path(path).map_err(Self::repo_error)?,
+            _ => nav.rf.clone(),
+        };
+        let listing = backend
+            .list(&rf, &rf.path)
+            .await
+            .map_err(Self::repo_error)?;
+        let mut data = Self::repo_envelope(&rf, "dir", backend.name());
+        Self::repo_merge(
+            &mut data,
+            json!({
+                "entries": listing.entries,
+                "truncated": listing.truncated,
+            }),
+        );
+        nav.push(rf);
+        self.repo_nav_set(auth, id, nav)?;
+        Ok(data)
+    }
+
+    /// Read a bounded, line-numbered slice of a file. Directories are rejected.
+    pub async fn repo_read(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoReadOptions,
+    ) -> ApiResult<Value> {
+        let nav = self.repo_nav_get(auth, id)?;
+        let backend = self.repo_backend(Some(nav.backend))?;
+        let path = options.path.as_deref().unwrap_or(&nav.path);
+        if path.is_empty() {
+            return Err(ApiError::bad_request("a file path is required"));
+        }
+        let rf = nav.rf.at_path(path).map_err(Self::repo_error)?;
+        // A successful non-empty listing means the caller pointed at a folder.
+        if let Ok(listing) = backend.list(&rf, &rf.path).await
+            && !listing.entries.is_empty()
+        {
+            return Err(ApiError::not_found(format!(
+                "path is a directory, not a file: {}",
+                rf.path
+            )));
+        }
+        let file: RepoFile = backend
+            .read(&rf, &rf.path, options.start_line, options.max_lines)
+            .await
+            .map_err(Self::repo_error)?;
+        let mut data = Self::repo_envelope(&rf, "file", backend.name());
+        Self::repo_merge(&mut data, Self::repo_json(&file)?);
+        Ok(data)
+    }
+
+    /// Substring search over the repository's flat tree (names and paths).
+    pub async fn repo_search(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoSearchOptions,
+    ) -> ApiResult<Value> {
+        let nav = self.repo_nav_get(auth, id)?;
+        let backend = self.repo_backend(Some(nav.backend))?;
+        let query = options.query.trim();
+        if query.is_empty() {
+            return Err(ApiError::bad_request("query must not be empty"));
+        }
+        let entries = backend.tree(&nav.rf, "").await.map_err(Self::repo_error)?;
+        let needle = query.to_ascii_lowercase();
+        let paths_only = options.paths_only.unwrap_or(false);
+        let mut matches: Vec<RepoEntry> = entries
+            .into_iter()
+            .filter(|entry| {
+                let haystack = format!("{} {}", entry.name, entry.path).to_ascii_lowercase();
+                haystack.contains(&needle) && (!paths_only || matches!(&entry.kind, RepoKind::Dir))
+            })
+            .collect();
+        let cap = self.config.repo_max_tree_entries;
+        let truncated = matches.len() >= cap;
+        matches.truncate(cap);
+        Ok(json!({
+            "repo": format!("{}/{}", nav.rf.owner, nav.rf.repo),
+            "ref": nav.rf.rf,
+            "query": options.query,
+            "matches": matches,
+            "truncated": truncated,
+            "source": backend.name(),
+        }))
+    }
+
+    /// Render the current navigation position as either a directory or a file.
+    async fn repo_render(&self, rf: &RepoRef, backend: &dyn RepoBackend) -> ApiResult<Value> {
+        let listing = backend.list(rf, &rf.path).await.map_err(Self::repo_error)?;
+        if rf.path.is_empty() || !listing.entries.is_empty() {
+            let mut data = Self::repo_envelope(rf, "dir", backend.name());
+            Self::repo_merge(
+                &mut data,
+                json!({
+                    "entries": listing.entries,
+                    "truncated": listing.truncated,
+                }),
+            );
+            return Ok(data);
+        }
+        let file = backend
+            .read(rf, &rf.path, None, None)
+            .await
+            .map_err(Self::repo_error)?;
+        let mut data = Self::repo_envelope(rf, "file", backend.name());
+        Self::repo_merge(&mut data, Self::repo_json(&file)?);
+        Ok(data)
+    }
+
+    /// Follow a relative path, absolute path or URL, or walk back/forward.
+    pub async fn repo_navigate(
+        &self,
+        auth: &AuthContext,
+        id: Option<&str>,
+        options: RepoNavigateOptions,
+    ) -> ApiResult<Value> {
+        let mut nav = self.repo_nav_get(auth, id)?;
+        let backend = self.repo_backend(Some(nav.backend))?;
+        match options
+            .direction
+            .as_deref()
+            .map(str::trim)
+            .filter(|direction| !direction.is_empty())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("back") => {
+                nav.undo();
+            }
+            Some("forward") => {
+                nav.redo();
+            }
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "invalid navigation direction {other:?}; valid values: back, forward"
+                )));
+            }
+            None => {
+                let target = options.target.trim();
+                if target.is_empty() {
+                    return Err(ApiError::bad_request("target must not be empty"));
+                }
+                let next = if target.starts_with("http://") || target.starts_with("https://") {
+                    RepoRef::parse(target).map_err(Self::repo_error)?
+                } else {
+                    nav.rf.relative(target).map_err(Self::repo_error)?
+                };
+                nav.push(next);
+            }
+        }
+        let data = self.repo_render(&nav.rf, backend).await?;
+        self.repo_nav_set(auth, id, nav)?;
         Ok(data)
     }
 

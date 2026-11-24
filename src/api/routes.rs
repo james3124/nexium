@@ -20,9 +20,11 @@ use serde_json::{Value, json};
 
 use super::service::{
     ApiError, ApiResult, ApiService, AuthContext, ClickOptions, CreateOptions, EvaluateOptions,
-    HoverOptions, PressOptions, ScreenshotOptions, ScrollOptions, SessionOptions, SnapshotOptions,
-    TabsCreateOptions, TabsTargetOptions, TypeOptions, VisionActOptions, VisionAnalyzeOptions,
-    VisionClickOptions, VisionCompareOptions, VisionFindOptions, VisionOptions, VisionTextOptions,
+    HoverOptions, PressOptions, RepoNavigateOptions, RepoOpenOptions, RepoPathOptions,
+    RepoReadOptions, RepoSearchOptions, RepoTreeOptions, ScreenshotOptions, ScrollOptions,
+    SessionOptions, SnapshotOptions, TabsCreateOptions, TabsTargetOptions, TypeOptions,
+    VisionActOptions, VisionAnalyzeOptions, VisionClickOptions, VisionCompareOptions,
+    VisionFindOptions, VisionOptions, VisionTextOptions,
 };
 use super::websocket;
 use super::{bidi, cdp, webdriver};
@@ -111,6 +113,12 @@ pub fn router(service: Arc<ApiService>) -> Router {
         .route("/browser/vision/click-target", post(vision_click_target))
         .route("/browser/vision/act", post(vision_act))
         .route("/browser/vision/compare", post(vision_compare))
+        .route("/browser/repo/open", post(repo_open))
+        .route("/browser/repo/tree", post(repo_tree))
+        .route("/browser/repo/list", post(repo_list))
+        .route("/browser/repo/read", post(repo_read))
+        .route("/browser/repo/search", post(repo_search))
+        .route("/browser/repo/navigate", post(repo_navigate))
         .route("/browser/snapshot", post(snapshot))
         .route("/browser/extract", post(extract))
         .route("/browser/evaluate", post(evaluate))
@@ -732,6 +740,92 @@ async fn vision_compare(
     respond(
         service
             .vision_compare(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn repo_open(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoOpenOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(service.repo_open(&auth, session.as_deref(), options).await)
+}
+
+async fn repo_tree(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoTreeOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(service.repo_tree(&auth, session.as_deref(), options).await)
+}
+
+async fn repo_list(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoPathOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(service.repo_list(&auth, session.as_deref(), options).await)
+}
+
+async fn repo_read(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoReadOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(service.repo_read(&auth, session.as_deref(), options).await)
+}
+
+async fn repo_search(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoSearchOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .repo_search(&auth, session.as_deref(), options)
+            .await,
+    )
+}
+
+async fn repo_navigate(
+    State(service): State<Arc<ApiService>>,
+    headers: HeaderMap,
+    ApiJson(options): ApiJson<RepoNavigateOptions>,
+) -> Response {
+    let (auth, header_session) = match auth_context(&service, &headers) {
+        Ok(value) => value,
+        Err(error) => return respond(Err(error)),
+    };
+    let session = pick_session(header_session, options.session_id.as_deref());
+    respond(
+        service
+            .repo_navigate(&auth, session.as_deref(), options)
             .await,
     )
 }

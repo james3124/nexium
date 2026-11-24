@@ -7,7 +7,7 @@ in this repository (no external driver binary or wrapped browser).
 |---|---|---|
 | W3C WebDriver | `POST /session`, `/status` | Selenium, WebDriver clients |
 | CDP | `/json/*`, `/devtools/browser`, `/devtools/page/{id}` | Puppeteer, DevTools, Selenium `executeCdpCommand` |
-| REST | `/browser/*`, `/browser/dom` | custom frameworks, AI agents |
+| REST | `/browser/*`, `/browser/dom`, `/browser/repo/*` | custom frameworks, AI agents |
 | MCP | stdio, `POST /mcp`, `/mcp/sse` | AI agents (OpenCode, Claude-style clients) |
 | WebDriver BiDi | `WS /session` | event-driven automation clients |
 
@@ -187,6 +187,37 @@ text stays exact via the layout index; the opt-in `glyph` OCR backend adds
 painted canvas/`<img>` text (clean opaque text at moderate/large sizes, bounded
 tiles, no model weights/GPU). Element ranking is deterministic heuristics;
 model-backed locators are a trait-only extension point, not a shipped backend.
+
+## Repositories (REST and MCP)
+
+Repository navigation shares the seven `repo_*` tools with REST
+`/browser/repo/*`; the REST body and MCP `arguments` are the same object and
+responses mirror MCP `structuredContent`. Session selection uses the standard
+`session_id` (body or `X-Nexium-Session`), owned by the authenticated agent.
+
+| MCP tool | REST endpoint | Purpose |
+|---|---|---|
+| `repo_open` | `POST /browser/repo/open` | Resolve a URL or `owner/repo@ref:path`, load metadata and the root listing. Accepts `backend: "github"` (default) or `"browser"`. |
+| `repo_tree` | `POST /browser/repo/tree` | Bounded flat tree, optionally filtered by `prefix`. |
+| `repo_list` | `POST /browser/repo/list` | Entries at `path` (defaults to the session path). |
+| `repo_read` | `POST /browser/repo/read` | Bounded, numbered file text (`path`, `start_line`, `max_lines`). |
+| `repo_search` | `POST /browser/repo/search` | Local substring search over the bounded tree (`query`, `paths_only`). |
+| `repo_navigate` | `POST /browser/repo/navigate` | Follow `target` (`..`, `../src`, path or URL) or walk `direction: back|forward`. |
+
+Every response carries `{repo, rf, path, kind, source}` where `source` is
+`github` or `browser`; file responses add `text`, `lines:[{n,text}]`,
+`total_lines`, `truncated`, `binary` and `language_hint`. The GitHub backend
+uses REST/raw endpoints with ETag revalidation and an optional bearer token
+(`github_token` or `GITHUB_TOKEN`, header-only); the browser backend drives the
+same `Browser`/DOM stack over `repo_web_base` and degrades gracefully when
+GitHub markup changes. Parsing rejects traversal, absolute shorthand paths and
+non-GitHub hosts. Bounds: `repo_max_tree_entries`, `repo_max_file_bytes`,
+`repo_cache_ttl_secs`/`repo_cache_max_entries`, and 1–2000 lines per read.
+
+`repo_history` is deferred (no commit-history tool/endpoint). Model/vision-based
+folder detection is an optional enhancement; the shipped browser backend uses
+DOM anchors, with `vision_find_element`/`vision_click_target` available for
+manual exploration. Full reference and examples: [REPOSITORIES.md](REPOSITORIES.md).
 
 ## Client compatibility notes
 

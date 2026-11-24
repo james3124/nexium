@@ -83,3 +83,18 @@ vision_min_diff_pixels = 40
 vision_max_candidates = 20
 # Persist before/after captures for vision_compare by default.
 vision_save_artifacts = false
+
+# Repository navigation tools (`/browser/repo/*`).
+# Optional GitHub token; the GITHUB_TOKEN environment variable is used when unset.
+# github_token = "change-me"
+# Largest file read as text (bytes); larger files are reported as metadata.
+repo_max_file_bytes = 1048576
+# Cap on tree/listing entries.
+repo_max_tree_entries = 50000
+# GitHub API response cache TTL and capacity.
+repo_cache_ttl_secs = 300
+repo_cache_max_entries = 128
+# Override REST/raw bases for local mirrors or test servers.
+# repo_api_base = "https://api.github.com"
+# repo_raw_base = "https://raw.githubusercontent.com"
+# repo_web_base = "https://github.com"

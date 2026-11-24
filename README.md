@@ -46,6 +46,7 @@ crawlers and AI agents:
 | Networking | HTTP/1.1 + HTTP/2 over Rustls, redirects, cookies (SameSite), disk cache with revalidation, CONNECT/SOCKS5 proxies, `no_proxy`, SSRF checks |
 | Interaction | Hit testing, mouse/keyboard events, `:hover`, Tab focus, form submission, contenteditable, accessibility tree, DOM snapshots |
 | Vision | Layout-grounded text runs and element ranking, description-based find/click, phrase lookup and before/after diffs (REST + MCP) |
+| Repositories | GitHub URL/shorthand parsing, bounded tree/read/navigate tools via REST + MCP, REST/raw backend and a browser-UI fallback backend |
 | Control plane | REST + WebSocket + MCP (stdio, Streamable HTTP, legacy SSE), per-agent sessions, tokens, rate limits, audit log, native HTTPS |
 
 ## Quick start
@@ -164,6 +165,21 @@ selector:
 
 `action` is `click` (default), `hover` or `scroll_into_view`; tied candidates
 and stale targets return `{ambiguous:true, executed:false}` without acting.
+
+Six `repo_*` tools add repository navigation: `repo_open`, `repo_tree`,
+`repo_list`, `repo_read`, `repo_search` and `repo_navigate`. They accept a
+GitHub URL or `owner/repo@ref:path` shorthand, keep per-session history, and
+return bounded, line-numbered file reads. The default `github` backend uses the
+REST/raw endpoints (with optional `GITHUB_TOKEN`); `backend: "browser"` reads
+the same repository through the browser UI as a fallback.
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"tools/call",
+ "params":{"name":"repo_open","arguments":{"repo":"owner/repo@main"}}}
+```
+
+`repo_history` is deferred; vision-based folder detection is optional. Full
+reference: [docs/REPOSITORIES.md](docs/REPOSITORIES.md).
 `vision_snapshot`/`vision_analyze`/`vision_extract_text` accept `ocr_backend`
 (`none` default, `glyph` opt-in for clean painted canvas/`<img>` text) and
 `vision_find_element`/`vision_click_target`/`vision_act` accept `locator`
@@ -190,9 +206,10 @@ Endpoints: `/health`, `/browser/{create,close,status,navigate,back,forward,
 reload,click,type,press,scroll,hover,screenshot,snapshot,extract,evaluate,
 tabs,tabs/create,tabs/close,tabs/switch,session/save,session/restore,network,
 console,dom}`, `POST /browser/vision/{snapshot,analyze,extract-text,
-find-element,click-target,act,compare}`, `/memory` (process RSS/VSZ/threads +
-system memory), `/ws`, `/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP
-adapters share the same engine — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
+find-element,click-target,act,compare}`, `POST /browser/repo/{open,tree,list,
+read,search,navigate}`, `/memory` (process RSS/VSZ/threads + system memory),
+`/ws`, `/v1/audit`, `/v1/admin/tokens*`. WebDriver and CDP adapters share the
+same engine — see [docs/PROTOCOLS.md](docs/PROTOCOLS.md).
 
 Responses use `{"ok":true,"data":...}` or structured errors. Authentication
 uses `Authorization: Bearer <token>`; requests select an agent with
@@ -306,7 +323,8 @@ src/
 ├── interaction/          viewport/scroll, hit testing, input, accessibility
 ├── storage/              atomic filesystem store, profiles
 ├── rendering/            render pipeline + screenshot encode/crop/diff
-└── intelligence/         DOM dumps, visible text, layout-grounded vision index
+└── intelligence/         DOM dumps, visible text, layout-grounded vision index,
+                          repository refs and github/browser backends
 ```
 
 ## Status and roadmap
@@ -320,6 +338,8 @@ than hidden:
   [docs/ROADMAP.md](docs/ROADMAP.md)
 - Vision design, implementation status and remaining backends:
   [docs/VISION_PLAN.md](docs/VISION_PLAN.md)
+- Repository tools, backends, auth and limits:
+  [docs/REPOSITORIES.md](docs/REPOSITORIES.md)
 - npm packaging and release workflow: [docs/NPM.md](docs/NPM.md)
 
 Not implemented yet: CSS transitions/animations, floats, subgrid, named grid

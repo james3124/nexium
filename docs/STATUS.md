@@ -260,6 +260,31 @@ limitations and licensing details. Product overview and usage live in
 - Browser-wide benchmark (`examples/benchmark.rs`) reporting parse, render
   and JS throughput together with process RSS; optionally runs a timed soak.
 
+**Repository navigation** is implemented and tested:
+
+- `RepoRef` parses GitHub URLs and `owner/repo@ref:path` shorthand, decodes
+  percent escapes, rejects traversal and unsupported hosts, and renders a
+  canonical reference used by every response.
+- `github` backend: REST contents/tree plus raw reads, in-memory ETag
+  revalidation with TTL/size bounds, optional header-only bearer token
+  (`GITHUB_TOKEN` fallback), and 403/429/404 error mapping.
+- `browser` backend (new): opens GitHub UI pages through `Browser`, maps
+  `tree`/`blob` anchors to directories/files, extracts `blob-code`/
+  `react-code-text` rows with a `visible_text` fallback, derives the default
+  branch from branch links, and walks tree links to depth 3. Markup changes
+  degrade to fewer entries, never panics.
+- Both backends share binary detection, line numbering, line-range reads and
+  truncation limits. The trait returns boxed futures so it can be held as
+  `Arc<dyn RepoBackend>` by the API service.
+- Tool surface: `repo_open`, `repo_tree`, `repo_list`, `repo_read`,
+  `repo_search`, `repo_navigate` over REST `/browser/repo/*` and MCP, with
+  per-session navigation history and a `source` field. Core/browser coverage
+  lives in `tests/repo_core_tests.rs` and `tests/repo_browser_tests.rs` using
+  local mock servers only.
+- Deferred: `repo_history`. Model/vision-based folder detection is an optional
+  enhancement; DOM anchor detection ships today. See
+  [REPOSITORIES.md](REPOSITORIES.md) for the full reference and limits.
+
 Not implemented yet: CSS transforms/transitions/animations, CSS Grid
 subgrid/named lines, SVG filters/advanced gradient transforms, box shadows,
 and HTTP/3. Floats, `clear`, `table-layout: fixed` and flex column wrapping

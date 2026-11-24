@@ -8,10 +8,11 @@ use serde_json::{Map, Value, json};
 
 use crate::api::service::{
     ApiError, ApiResult, ApiService, AuthContext, ClickOptions, CreateOptions, EvaluateOptions,
-    HoverOptions, PressOptions, ScreenshotOptions, ScrollOptions, SessionOptions, SnapshotOptions,
-    TabsCreateOptions, TabsTargetOptions, TypeOptions, VisionActOptions, VisionAnalyzeOptions,
-    VisionClickOptions, VisionCompareOptions, VisionFindOptions, VisionOptions, VisionTextOptions,
-    WaitOptions,
+    HoverOptions, PressOptions, RepoNavigateOptions, RepoOpenOptions, RepoPathOptions,
+    RepoReadOptions, RepoSearchOptions, RepoTreeOptions, ScreenshotOptions, ScrollOptions,
+    SessionOptions, SnapshotOptions, TabsCreateOptions, TabsTargetOptions, TypeOptions,
+    VisionActOptions, VisionAnalyzeOptions, VisionClickOptions, VisionCompareOptions,
+    VisionFindOptions, VisionOptions, VisionTextOptions, WaitOptions,
 };
 
 #[derive(Deserialize)]
@@ -132,6 +133,30 @@ pub async fn call(
         "vision_compare" => {
             let args: VisionCompareOptions = parse(&arguments)?;
             service.vision_compare(auth, session, args).await
+        }
+        "repo_open" => {
+            let args: RepoOpenOptions = parse(&arguments)?;
+            service.repo_open(auth, session, args).await
+        }
+        "repo_tree" => {
+            let args: RepoTreeOptions = parse(&arguments)?;
+            service.repo_tree(auth, session, args).await
+        }
+        "repo_list" => {
+            let args: RepoPathOptions = parse(&arguments)?;
+            service.repo_list(auth, session, args).await
+        }
+        "repo_read" => {
+            let args: RepoReadOptions = parse(&arguments)?;
+            service.repo_read(auth, session, args).await
+        }
+        "repo_search" => {
+            let args: RepoSearchOptions = parse(&arguments)?;
+            service.repo_search(auth, session, args).await
+        }
+        "repo_navigate" => {
+            let args: RepoNavigateOptions = parse(&arguments)?;
+            service.repo_navigate(auth, session, args).await
         }
         "browser_network" => service.network(auth, session).await,
         "browser_status" => service.status(auth, session).await,
@@ -710,6 +735,144 @@ pub fn tool_definitions() -> Vec<Value> {
         "vision_compare",
         "Compare two captures around a caller-driven action: pixel ratio, changed regions and text diff.",
         properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "url".to_owned(),
+        json!({
+            "type": "string",
+            "description": "GitHub URL (repo, /tree/<ref>/<path> or /blob/<ref>/<path>) to open. Either url or repo is required."
+        }),
+    );
+    properties.insert(
+        "repo".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Repository shorthand: owner/repo, owner/repo@ref or owner/repo@ref:path."
+        }),
+    );
+    properties.insert(
+        "backend".to_owned(),
+        json!({
+            "type": "string", "enum": ["github", "browser"],
+            "description": "Repository backend: github (default) or browser UI fallback."
+        }),
+    );
+    tools.push(tool(
+        "repo_open",
+        "Open a GitHub repository and show metadata plus its root directory entries.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "prefix".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Only return tree entries whose full path starts with this prefix."
+        }),
+    );
+    tools.push(tool(
+        "repo_tree",
+        "Return a bounded flat tree of repository paths and types, optionally filtered by prefix.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "path".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Directory to list; defaults to the session's current repository path."
+        }),
+    );
+    tools.push(tool(
+        "repo_list",
+        "List the entries of one repository directory and update the navigation history.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "path".to_owned(),
+        json!({
+            "type": "string",
+            "description": "File path to read; defaults to the session's current repository path."
+        }),
+    );
+    properties.insert(
+        "start_line".to_owned(),
+        json!({
+            "type": "integer", "minimum": 1,
+            "description": "First 1-based line to return (default 1)."
+        }),
+    );
+    properties.insert(
+        "max_lines".to_owned(),
+        json!({
+            "type": "integer", "minimum": 1, "maximum": 2000,
+            "description": "Maximum number of lines to return (default 400, hard cap 2000)."
+        }),
+    );
+    tools.push(tool(
+        "repo_read",
+        "Read bounded, line-numbered file content; large or binary files return metadata only.",
+        properties,
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "query".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Case-insensitive substring to match against tree entry names and paths."
+        }),
+    );
+    properties.insert(
+        "paths_only".to_owned(),
+        json!({
+            "type": "boolean",
+            "description": "Return only directory paths, filtering out file entries (default false)."
+        }),
+    );
+    tools.push(required(
+        tool(
+            "repo_search",
+            "Search repository paths locally with a substring query; returns matching tree entries.",
+            properties,
+        ),
+        &["query"],
+    ));
+
+    let mut properties = Map::new();
+    session_property(&mut properties);
+    properties.insert(
+        "target".to_owned(),
+        json!({
+            "type": "string",
+            "description": "Relative path (.., ../src, src/lib.rs), absolute path, URL or repo shorthand to navigate to."
+        }),
+    );
+    properties.insert(
+        "direction".to_owned(),
+        json!({
+            "type": "string", "enum": ["back", "forward"],
+            "description": "Walk the session's repository navigation history instead of using target."
+        }),
+    );
+    tools.push(required(
+        tool(
+            "repo_navigate",
+            "Follow a path or URL and return a directory listing or file content; back/forward walks history.",
+            properties,
+        ),
+        &["target"],
     ));
 
     tools

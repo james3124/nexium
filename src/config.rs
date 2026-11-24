@@ -98,6 +98,22 @@ pub struct Config {
     pub vision_max_candidates: usize,
     /// Persist before/after captures for `vision_compare` by default.
     pub vision_save_artifacts: bool,
+    /// Optional GitHub token for repository tools. `GITHUB_TOKEN` is used when unset.
+    pub github_token: Option<String>,
+    /// Largest file returned as text by repository reads. Larger files are reported as binary/metadata.
+    pub repo_max_file_bytes: usize,
+    /// Maximum number of entries in a repository tree or directory listing.
+    pub repo_max_tree_entries: usize,
+    /// Cache lifetime for GitHub API responses in seconds.
+    pub repo_cache_ttl_secs: u64,
+    /// Maximum cached GitHub API responses held in memory.
+    pub repo_cache_max_entries: usize,
+    /// Override for the GitHub REST base URL (used by local test servers).
+    pub repo_api_base: Option<String>,
+    /// Override for the raw file base URL (used by local test servers).
+    pub repo_raw_base: Option<String>,
+    /// Override for the GitHub web UI base URL (browser backend and tests).
+    pub repo_web_base: Option<String>,
 }
 
 impl Default for Config {
@@ -146,6 +162,14 @@ impl Default for Config {
             vision_min_diff_pixels: 40,
             vision_max_candidates: 20,
             vision_save_artifacts: false,
+            github_token: None,
+            repo_max_file_bytes: 1024 * 1024,
+            repo_max_tree_entries: 50_000,
+            repo_cache_ttl_secs: 300,
+            repo_cache_max_entries: 128,
+            repo_api_base: None,
+            repo_raw_base: None,
+            repo_web_base: None,
         }
     }
 }

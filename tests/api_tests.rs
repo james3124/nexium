@@ -651,6 +651,12 @@ async fn mcp_lists_tools_and_executes_browser_calls() {
         "vision_click_target",
         "vision_act",
         "vision_compare",
+        "repo_open",
+        "repo_tree",
+        "repo_list",
+        "repo_read",
+        "repo_search",
+        "repo_navigate",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }

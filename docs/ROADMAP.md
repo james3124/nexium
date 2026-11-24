@@ -374,6 +374,27 @@ limits, cleanup and recovery behavior.
 - Session snapshots recover tabs/history/storage, not live JS timers or
   in-flight network requests.
 
+## Repository navigation (shipped)
+
+- [x] `RepoRef` parsing for GitHub URL/shorthand forms, canonical `Display`,
+      `at_path`/`relative` path handling, percent decoding, and rejection of
+      traversal, absolute shorthand paths and unsupported hosts.
+- [x] `RepoBackend` with `github` (REST/raw, ETag cache, optional bearer token,
+      structured rate-limit/not-found errors) and `browser` (UI anchors,
+      DOM code extraction, bounded BFS tree walk) implementations.
+- [x] Bounded reads: file byte cap, NUL/UTF-8 binary detection, line ranges
+      (1–2000 lines), tree/listing entry cap and truncation flags.
+- [x] Tool/REST surface: `repo_open`, `repo_tree`, `repo_list`, `repo_read`,
+      `repo_search`, `repo_navigate` at `/browser/repo/*`, with per-session
+      history, `source` identification and MCP parity.
+- [x] Local-server tests for the parser, API backend (headers, ETag, error
+      mapping) and browser backend (list/read/tree/metadata and link clicks).
+- [ ] `repo_history` (commit history) — deferred.
+- [ ] Model/vision-based folder detection — optional enhancement; DOM anchors
+      and the existing vision find/click tools cover current use.
+
+Reference: [REPOSITORIES.md](REPOSITORIES.md).
+
 ## Test status
 
 - 359 automated tests across HTML, DOM, selectors, entities/quirks/templates,

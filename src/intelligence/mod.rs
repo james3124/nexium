@@ -2,10 +2,15 @@
 
 pub mod dom;
 pub mod ocr;
+pub mod repo;
 pub mod visual;
 
 pub use dom::{collapse_whitespace, dump_tree, visible_text};
 pub use ocr::{GlyphOcr, NoOcr, OcrBackend, RecognizedText};
+pub use repo::{
+    BrowserRepoBackend, GitHubApiBackend, RepoBackend, RepoEntry, RepoError, RepoFile, RepoKind,
+    RepoLine, RepoListing, RepoMetadata, RepoRef,
+};
 pub use visual::{
     ChangedRegion, ElementLocator, ElementMatch, HeuristicLocator, TextMatch, TextRun,
     VisualComparison, VisualElement, VisualIndex, VisualRect, locator,
