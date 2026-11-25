@@ -21,7 +21,7 @@ use crate::engine::layout::Rect;
 use crate::intelligence::visual::compare_images;
 use crate::intelligence::{
     BrowserRepoBackend, ElementLocator, ElementMatch, GitHubApiBackend, GlyphOcr, NoOcr,
-    OcrBackend, RepoBackend, RepoEntry, RepoError, RepoFile, RepoKind, RepoRef, VisualIndex,
+    OcrBackend, RepoBackend, RepoEntry, RepoError, RepoKind, RepoRef, VisualIndex,
 };
 use crate::interaction::MouseButton;
 use crate::networking::NetworkEvent;
@@ -2582,19 +2582,26 @@ impl ApiService {
             return Err(ApiError::bad_request("a file path is required"));
         }
         let rf = nav.rf.at_path(path).map_err(Self::repo_error)?;
-        // A successful non-empty listing means the caller pointed at a folder.
-        if let Ok(listing) = backend.list(&rf, &rf.path).await
-            && !listing.entries.is_empty()
-        {
-            return Err(ApiError::not_found(format!(
-                "path is a directory, not a file: {}",
-                rf.path
-            )));
-        }
-        let file: RepoFile = backend
+        // Read first: a blob page can contain self-links that look like a
+        // non-empty listing to the browser backend. Only when the read fails
+        // do we check whether the caller actually pointed at a directory.
+        let file = match backend
             .read(&rf, &rf.path, options.start_line, options.max_lines)
             .await
-            .map_err(Self::repo_error)?;
+        {
+            Ok(file) => file,
+            Err(error) => {
+                if let Ok(listing) = backend.list(&rf, &rf.path).await
+                    && !listing.entries.is_empty()
+                {
+                    return Err(ApiError::not_found(format!(
+                        "path is a directory, not a file: {}",
+                        rf.path
+                    )));
+                }
+                return Err(Self::repo_error(error));
+            }
+        };
         let mut data = Self::repo_envelope(&rf, "file", backend.name());
         Self::repo_merge(&mut data, Self::repo_json(&file)?);
         Ok(data)

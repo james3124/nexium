@@ -784,11 +784,20 @@ impl BrowserRepoBackend {
     }
 
     async fn open(&self, url: &str) -> Result<Page, RepoError> {
-        let browser = Browser::new(self.config.clone());
-        browser
+        // Repository trees and blob pages are server-rendered; executing the
+        // host page's scripts is unnecessary and can overflow the JS runtime
+        // on large code-hosting pages.
+        let mut config = self.config.clone();
+        config.javascript_enabled = false;
+        let browser = Browser::new(config);
+        let page = browser
             .open(url)
             .await
-            .map_err(|error| RepoError::upstream(format!("browser navigation failed: {error}")))
+            .map_err(|error| RepoError::upstream(format!("browser navigation failed: {error}")))?;
+        if page.status.as_u16() == 404 {
+            return Err(RepoError::not_found(format!("not found: {url}")));
+        }
+        Ok(page)
     }
 
     /// Split a same-host anchor into `(kind, repo path, ref, absolute URL)`.
@@ -1016,12 +1025,15 @@ fn code_text(doc: &Document) -> Option<String> {
     let ids = doc.descendants(doc.document_node());
     let is_code = |id: NodeId| {
         doc.element(id).is_some_and(|element| {
+            if element.get_attribute("data-testid") == Some("code-cell") {
+                return true;
+            }
             element.get_attribute("class").is_some_and(|class| {
                 class.split_ascii_whitespace().any(|token| {
                     token == "blob-code"
-                        || token.starts_with("blob-code-")
-                        || token == "react-code-text"
-                        || token.starts_with("react-code-text-")
+                        || token == "blob-code-inner"
+                        || token.starts_with("blob-code-inner")
+                        || token == "react-file-line"
                 })
             })
         })
