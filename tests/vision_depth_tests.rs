@@ -1,7 +1,7 @@
 use fontdue::{Font, FontSettings};
 use image::{Rgba, RgbaImage};
 use nexium::engine::css::Viewport;
-use nexium::intelligence::{GlyphOcr, NoOcr, OcrBackend, VisualIndex, locator};
+use nexium::intelligence::{GlyphOcr, NoOcr, OcrBackend, RecognizedText, VisualIndex, locator};
 use nexium::{Browser, Config, RenderOptions};
 
 fn draw_text(image: &mut RgbaImage, text: &str, x: u32, y: u32, size: f32) {
@@ -25,6 +25,51 @@ fn draw_text(image: &mut RgbaImage, text: &str, x: u32, y: u32, size: f32) {
             }
         }
         pen += metrics.advance_width;
+    }
+}
+
+/// Paint text with a negative effective letter spacing so neighbouring glyph
+/// bitmaps touch and merge into a single connected component. This is the
+/// pixel pattern behind the live-canvas bug where "GO" was read as "UU".
+fn draw_text_tight(image: &mut RgbaImage, text: &str, x: u32, y: u32, size: f32, overlap: f32) {
+    let font = Font::from_bytes(
+        &include_bytes!("../assets/fonts/DejaVuSans.ttf")[..],
+        FontSettings::default(),
+    )
+    .expect("font");
+    let mut pen = x as f32;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, size);
+        for py in 0..metrics.height {
+            for px in 0..metrics.width {
+                let alpha = bitmap[py * metrics.width + px];
+                if alpha > 0 {
+                    let target = image.get_pixel_mut(pen as u32 + px as u32, y + py as u32);
+                    let value = 255u16.saturating_sub(alpha as u16) as u8;
+                    *target = Rgba([value, value, value, 255]);
+                }
+            }
+        }
+        pen += (metrics.advance_width - overlap).max(1.0);
+    }
+}
+
+/// Reading order across results; whitespace inserted between separated glyphs
+/// must not hide the underlying letter sequence.
+fn recognized_text(results: &[RecognizedText]) -> String {
+    results
+        .iter()
+        .flat_map(|result| result.text.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
+fn full_region(width: u32, height: u32) -> nexium::engine::layout::Rect {
+    nexium::engine::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
     }
 }
 
@@ -101,6 +146,70 @@ async fn glyph_ocr_recognises_large_painted_text() {
             .collect::<Vec<_>>()
     );
     assert!(results.iter().all(|result| result.source == "ocr"));
+}
+
+#[tokio::test]
+async fn glyph_ocr_recognises_touching_glyphs_in_tight_go() {
+    let mut image = RgbaImage::from_pixel(320, 120, Rgba([255, 255, 255, 255]));
+    // A 5.5px overlap (~85% of the normal G advance at 48px) joins the G and O
+    // bitmaps while leaving a clear waist between them: the live canvas case
+    // that was read as a single "U".
+    draw_text_tight(&mut image, "GO", 20, 30, 48.0, 5.5);
+    let results = GlyphOcr::default().recognize(&image, full_region(320, 120));
+    let text = recognized_text(&results);
+    let found: Vec<&str> = results.iter().map(|result| result.text.as_str()).collect();
+    assert!(
+        text.contains("GO"),
+        "touching glyphs must be read as G then O, not one substitute letter: {text:?} from {found:?}"
+    );
+}
+
+#[tokio::test]
+async fn glyph_ocr_does_not_over_split_a_single_wide_glyph() {
+    let mut image = RgbaImage::from_pixel(320, 120, Rgba([255, 255, 255, 255]));
+    draw_text_tight(&mut image, "W", 20, 30, 44.0, 0.0);
+    let results = GlyphOcr::default().recognize(&image, full_region(320, 120));
+    let text = recognized_text(&results);
+    let found: Vec<&str> = results.iter().map(|result| result.text.as_str()).collect();
+    assert_eq!(
+        text, "W",
+        "one wide glyph must stay one character rather than being split: {text:?} from {found:?}"
+    );
+}
+
+#[tokio::test]
+async fn glyph_ocr_tiling_has_no_duplicate_overlapping_results() {
+    // 1200x600 exceeds the default 256x192 tile budget, so recognition runs in
+    // overlapping tiles. Place words across both tile seams (x~301, y~145/290).
+    let (width, height) = (1200u32, 600u32);
+    let mut image = RgbaImage::from_pixel(width, height, Rgba([255, 255, 255, 255]));
+    draw_text_tight(&mut image, "STOP", 296, 140, 36.0, 0.0);
+    draw_text_tight(&mut image, "GO", 598, 430, 48.0, 5.5);
+    let results = GlyphOcr::default().recognize(&image, full_region(width, height));
+    assert!(
+        !results.is_empty(),
+        "tiled OCR returned no results: {results:?}"
+    );
+    for (index, left) in results.iter().enumerate() {
+        for right in results.iter().skip(index + 1) {
+            let overlap_x = (left.rect.x + left.rect.width).min(right.rect.x + right.rect.width)
+                - left.rect.x.max(right.rect.x);
+            let overlap_y = (left.rect.y + left.rect.height).min(right.rect.y + right.rect.height)
+                - left.rect.y.max(right.rect.y);
+            if overlap_x <= 0.0 || overlap_y <= 0.0 {
+                continue;
+            }
+            let smaller =
+                (left.rect.width * left.rect.height).min(right.rect.width * right.rect.height);
+            let ratio = overlap_x * overlap_y / smaller.max(1.0);
+            assert!(
+                ratio < 0.7,
+                "duplicate overlapping OCR results {:?} and {:?} overlap {ratio:.2}",
+                left.text,
+                right.text
+            );
+        }
+    }
 }
 
 #[tokio::test]

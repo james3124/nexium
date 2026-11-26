@@ -313,10 +313,11 @@ CSS Grid geometry, SVG/canvas painting, page WebSockets, Web Workers and
 modern browser APIs. The vision suites cover the core visual index, REST
 service routes and all seven MCP tools (including the `snapshot` alias and
 `structuredContent` shapes) against local HTML fixtures.
-`tests/vision_depth_tests.rs` and `tests/vision_depth_api_tests.rs` cover OCR
-backends, the locator registry, index OCR and glyph recognition, and
-`vision_act` over REST/MCP (including ambiguous, auto-scroll and verification
-cases); the combined vision regression is 36 tests passed, 0 failed.
+`tests/vision_depth_tests.rs` (7 tests) and `tests/vision_depth_api_tests.rs`
+(6 tests) cover OCR backends, the locator registry, index OCR and glyph
+recognition, and `vision_act` over REST/MCP (including ambiguous, auto-scroll
+and verification cases); rendering/vision regressions total 42 tests (21
+rendering + 8 vision API + 6 vision core + 7 vision MCP). All passed, 0 failed.
 Networking and script tests use in-process servers; no external network access
 is required.
 `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
@@ -485,12 +486,18 @@ Control plane:
 Vision:
 
 - DOM text and element facts come from text/styles and the rendered layout and
-  remain exact. Canvas/`<img>` text needs the opt-in `ocr_backend: "glyph"`
-  (`none` is the default). Glyph OCR is a bounded, template-based recognizer for
-  clean opaque text at moderate/large sizes — no model weights, GPU or VLM; the
-  bounded-working-set / tiling / ordered-merge concepts come from
-  baidu/Unlimited-OCR, not its model or code. Anti-aliased or very small text
-  may be missed.
+  remain exact; OCR only covers painted/canvas text. Canvas/`<img>` text needs
+  the opt-in `ocr_backend: "glyph"` (`none` is the default). Glyph OCR is a
+  bounded, template-based recognizer for clean opaque text at moderate/large
+  sizes — no model weights, GPU or VLM; the bounded-working-set / tiling /
+  ordered-merge concepts come from baidu/Unlimited-OCR, not its model or code.
+  Wide connected components are split on ink valleys/waists, with shallow-waist
+  and balanced-mass fallbacks for very wide components, before the size filter;
+  touching glyphs read as separate letters without over-splitting single wide
+  glyphs such as `W`. Remaining limits: extreme overlap with no usable valley,
+  waist or balanced mass (~0.8x advance) can be rejected; anti-aliased/very small text,
+  exotic fonts and descender-heavy lowercase text are bounded by the 16x16
+  template matcher.
 - Element localization uses deterministic token/affordance scoring
   (`HeuristicLocator`) rather than a trained model. `ElementLocator` and
   `OcrBackend` are pluggable traits, but no model/object-detection backend

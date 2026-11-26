@@ -30,7 +30,11 @@ var ctx = document.getElementById('paint').getContext('2d');
 ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 600, 200);
 ctx.fillStyle = '#000'; ctx.font = '48px sans-serif';
 ctx.fillText('STOP', 20, 75);
-ctx.fillText('GO', 20, 150);
+// Draw the second word with overlapping glyph bitmaps: at 48px the normal
+// advance is ~37px, so painting O at x=52 (85% of that advance) makes the
+// glyphs touch while leaving a waist, reproducing the "UU" canvas blob.
+ctx.fillText('G', 20, 150);
+ctx.fillText('O', 52, 150);
 </script>
 </body></html>"#;
 
@@ -288,6 +292,17 @@ async fn glyph_ocr_adds_ocr_results_and_none_adds_none() {
             .chars()
             .any(|ch| ch.is_ascii_alphabetic())
     }));
+    let joined: String = ocr
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .collect::<String>()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    assert!(
+        joined.contains("GO"),
+        "tightly spaced canvas 'GO' was not read as G followed by O: {joined:?} (ocr: {data})"
+    );
     assert!(ocr[0]["rect"]["width"].as_f64().unwrap() > 0.0);
     // The layout-grounded fields remain unchanged.
     assert!(data["text"].as_str().unwrap().trim().is_empty());

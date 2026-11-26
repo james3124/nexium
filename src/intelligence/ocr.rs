@@ -108,23 +108,37 @@ impl OcrBackend for GlyphOcr {
             }
             y += stride_y;
         }
-        results.sort_by(|a, b| {
-            a.rect
-                .y
-                .total_cmp(&b.rect.y)
-                .then(a.rect.x.total_cmp(&b.rect.x))
-        });
+        // Tiles overlap, so the same glyph can be recognised twice with
+        // slightly different boxes and even different letters. Prefer the
+        // higher-confidence detection and discard any result that substantially
+        // overlaps one already kept.
+        results.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
         let mut merged: Vec<RecognizedText> = Vec::new();
         for result in results {
             let duplicate = merged.iter().any(|existing| {
-                existing.text == result.text
-                    && (existing.rect.y - result.rect.y).abs() <= 8.0
-                    && (existing.rect.x - result.rect.x).abs() <= self.tile_overlap as f32 * 2.0
+                let overlap_x = (existing.rect.x + existing.rect.width)
+                    .min(result.rect.x + result.rect.width)
+                    - existing.rect.x.max(result.rect.x);
+                let overlap_y = (existing.rect.y + existing.rect.height)
+                    .min(result.rect.y + result.rect.height)
+                    - existing.rect.y.max(result.rect.y);
+                if overlap_x <= 0.0 || overlap_y <= 0.0 {
+                    return false;
+                }
+                let smaller = (existing.rect.width * existing.rect.height)
+                    .min(result.rect.width * result.rect.height);
+                overlap_x * overlap_y >= smaller * 0.5
             });
             if !duplicate {
                 merged.push(result);
             }
         }
+        merged.sort_by(|a, b| {
+            a.rect
+                .y
+                .total_cmp(&b.rect.y)
+                .then(a.rect.x.total_cmp(&b.rect.x))
+        });
         merged
     }
 }
@@ -151,11 +165,11 @@ impl GlyphOcr {
         }
 
         let mut components = connected_components(&ink, width, height);
+        // Do not reject wide components yet: several touching glyphs can form
+        // one wide blob. They are split into per-character pieces inside the
+        // line loop below, then the size filter is applied to each piece.
         components.retain(|component| {
-            component.area >= 3
-                && component.width <= 48
-                && component.height <= 96
-                && component.height >= 5
+            component.area >= 3 && component.height <= 96 && component.height >= 5
         });
         if components.is_empty() {
             return Vec::new();
@@ -193,49 +207,64 @@ impl GlyphOcr {
             let mut line_rect = VisualRect::default();
             let mut text = String::new();
             let mut confidence_total = 0.0;
+            let mut matches = 0usize;
             let mut previous_right = 0usize;
             let mut median_advance = 0.0f32;
             let mut ordered = line;
             ordered.sort_by_key(|component| component.x);
             for (index, component) in ordered.iter().enumerate() {
-                let crop = component_mask(&ink, width, component);
-                let (character, score) = match_template(&crop, &templates);
+                // Word gaps are only meaningful between separate components;
+                // pieces of one split component are glued together below.
                 if index > 0 {
                     let gap = component.x.saturating_sub(previous_right) as f32;
                     if median_advance > 0.0 && gap > median_advance * 0.45 {
                         text.push(' ');
                     }
                 }
-                text.push(character);
-                confidence_total += score;
-                median_advance = if median_advance == 0.0 {
-                    component.width as f32
-                } else {
-                    median_advance * 0.7 + component.width as f32 * 0.3
-                };
-                previous_right = component.x + component.width;
-                let rect = VisualRect {
-                    x: x0 as f32 + component.x as f32,
-                    y: y0 as f32 + component.y as f32,
-                    width: component.width as f32,
-                    height: component.height as f32,
-                };
-                if index == 0 {
-                    line_rect = rect;
-                } else {
-                    let right = (line_rect.x + line_rect.width).max(rect.x + rect.width);
-                    let bottom = (line_rect.y + line_rect.height).max(rect.y + rect.height);
-                    line_rect.x = line_rect.x.min(rect.x);
-                    line_rect.y = line_rect.y.min(rect.y);
-                    line_rect.width = right - line_rect.x;
-                    line_rect.height = bottom - line_rect.y;
+                for part in split_component(&ink, width, component) {
+                    if !(2..=48).contains(&part.width)
+                        || !(5..=96).contains(&part.height)
+                        || part.area < 3
+                    {
+                        continue;
+                    }
+                    let crop = component_mask(&ink, width, &part);
+                    let aspect = part.width as f32 / part.height.max(1) as f32;
+                    let height_ratio = part.height as f32 / estimated.max(1.0);
+                    let (character, score) =
+                        match_template(&crop, &templates, aspect, height_ratio);
+                    text.push(character);
+                    confidence_total += score;
+                    matches += 1;
+                    median_advance = if median_advance == 0.0 {
+                        part.width as f32
+                    } else {
+                        median_advance * 0.7 + part.width as f32 * 0.3
+                    };
+                    let rect = VisualRect {
+                        x: x0 as f32 + part.x as f32,
+                        y: y0 as f32 + part.y as f32,
+                        width: part.width as f32,
+                        height: part.height as f32,
+                    };
+                    if matches == 1 {
+                        line_rect = rect;
+                    } else {
+                        let right = (line_rect.x + line_rect.width).max(rect.x + rect.width);
+                        let bottom = (line_rect.y + line_rect.height).max(rect.y + rect.height);
+                        line_rect.x = line_rect.x.min(rect.x);
+                        line_rect.y = line_rect.y.min(rect.y);
+                        line_rect.width = right - line_rect.x;
+                        line_rect.height = bottom - line_rect.y;
+                    }
                 }
+                previous_right = component.x + component.width;
             }
             if !text.trim().is_empty() {
                 results.push(RecognizedText {
                     text: text.trim().to_owned(),
                     rect: line_rect,
-                    confidence: confidence_total / ordered.len() as f32,
+                    confidence: confidence_total / matches.max(1) as f32,
                     source: "ocr".to_owned(),
                 });
             }
@@ -257,6 +286,9 @@ struct Component {
 struct Template {
     character: char,
     mask: Vec<bool>,
+    aspect: f32,
+    /// Glyph bitmap height divided by font size; separates caps from x-height.
+    height_ratio: f32,
 }
 
 const GRID: usize = 16;
@@ -332,6 +364,185 @@ fn component_mask(ink: &[bool], width: usize, component: &Component) -> Vec<bool
     grid
 }
 
+/// Splits one connected component into per-character pieces when it is wide
+/// relative to its height *and* has at least one ink valley separating the
+/// glyphs. A single wide glyph (`W`, `M`) lacks a genuine valley and is
+/// returned untouched. Work is linear in the component width and the number of
+/// pieces is capped at eight, so this cannot blow up on a large tile.
+fn split_component(ink: &[bool], stride: usize, component: &Component) -> Vec<Component> {
+    let width = component.width;
+    let height = component.height;
+    if height < 5 || width < 2 || (width as f32 / height as f32) <= 1.35 {
+        return vec![*component];
+    }
+
+    // Ink count per column over the component's vertical extent.
+    let mut columns = vec![0usize; width];
+    for cy in component.y..component.y + height {
+        let row = cy * stride;
+        for (offset, count) in columns.iter_mut().enumerate() {
+            if ink[row + component.x + offset] {
+                *count += 1;
+            }
+        }
+    }
+
+    // A real inter-glyph gap leaves almost no ink, while the strokes on either
+    // side are dense. Requiring dense shoulders two columns away rejects the
+    // shallow notches of single wide glyphs and flat bars (e.g. the crossbar
+    // of `T`), neither of which is a character boundary.
+    let valley_limit = ((height as f32 * 0.16).round() as usize).max(1);
+    let shoulder_limit = (valley_limit * 2).max(valley_limit + 2);
+    let mut valleys: Vec<usize> = (1..width.saturating_sub(1))
+        .filter(|&offset| {
+            columns[offset] <= valley_limit
+                && columns[offset.saturating_sub(2)] > shoulder_limit
+                && columns[(offset + 2).min(width - 1)] > shoulder_limit
+        })
+        .collect();
+
+    // One glyph advances roughly 0.88 of its painted height. Use that to
+    // guess the number of characters and evenly space the target boundaries.
+    let advance = (height as f32 * 0.88).max(1.0);
+    let min_segment = ((advance * 0.35).round() as usize).max(3);
+
+    // Glyph bitmaps may overlap instead of leaving an empty column. The
+    // junction then shows only a shallow waist. Accept those only for very
+    // wide blobs, which cannot be a single glyph in the embedded fonts; this
+    // keeps wide single letters such as W and M unsplit.
+    let shallow = valleys.is_empty() && (width as f32 / height as f32) > 1.6;
+    if shallow {
+        valleys = (1..width.saturating_sub(1))
+            .filter(|&offset| {
+                let shoulders =
+                    columns[offset.saturating_sub(2)] + columns[(offset + 2).min(width - 1)];
+                shoulders >= columns[offset] * 2 + 8
+            })
+            .collect();
+    }
+
+    // Last resort: an extremely wide blob whose glyphs overlap so much that
+    // no waist survives. Cut near the even boundary at the lowest-ink column,
+    // but only when both halves carry comparable ink mass (two letters).
+    let even = valleys.is_empty() && (width as f32 / height as f32) > 1.8;
+    if even {
+        let half = width / 2;
+        let left: usize = columns[..half].iter().sum();
+        let right: usize = columns[half..].iter().sum();
+        if left > 0 && right > 0 && left.max(right) <= left.min(right) * 2 {
+            let from = half.saturating_sub(min_segment).max(1);
+            let to = (half + min_segment).min(width.saturating_sub(2));
+            if from <= to {
+                if let Some(offset) =
+                    (from..=to).min_by_key(|&offset| (columns[offset], offset.abs_diff(half)))
+                {
+                    valleys.push(offset);
+                }
+            }
+        }
+    }
+    if valleys.is_empty() {
+        return vec![*component];
+    }
+
+    let count = ((width as f32 / advance).round() as usize)
+        .clamp(2, 8)
+        .min(valleys.len() + 1);
+    let window = ((advance * 0.5).round() as usize).max(min_segment);
+
+    let mut boundaries: Vec<usize> = Vec::new();
+    for part in 1..count {
+        let target = width * part / count;
+        let mut best: Option<(usize, usize, usize)> = None; // rank, tie-break, offset
+        for &offset in &valleys {
+            if offset < min_segment || width - offset < min_segment {
+                continue;
+            }
+            if boundaries
+                .iter()
+                .any(|&previous| offset.abs_diff(previous) < min_segment)
+            {
+                continue;
+            }
+            let distance = offset.abs_diff(target);
+            if distance > window {
+                continue;
+            }
+            // Deep valleys are ranked by depth; shallow waists are ranked by
+            // how close they are to the evenly spaced target boundary.
+            let candidate = if shallow || even {
+                (distance, columns[offset], offset)
+            } else {
+                (columns[offset], distance, offset)
+            };
+            if best.map_or(true, |(first, second, _)| candidate < (first, second, 0)) {
+                best = Some(candidate);
+            }
+        }
+        if let Some((_, _, offset)) = best {
+            boundaries.push(offset);
+        }
+    }
+    if boundaries.is_empty() {
+        return vec![*component];
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut pieces = Vec::with_capacity(boundaries.len() + 1);
+    let mut start = component.x;
+    for &offset in boundaries.iter().chain(std::iter::once(&width)) {
+        let end = component.x + offset;
+        let Some(piece) = piece_between(ink, stride, component, start, end) else {
+            return vec![*component];
+        };
+        pieces.push(piece);
+        start = end;
+    }
+    if pieces.len() < 2 || pieces.iter().any(|piece| piece.area < 3 || piece.width < 2) {
+        return vec![*component];
+    }
+    pieces
+}
+
+/// Rebuilds one sub-component from the ink inside `[start, end)` horizontally
+/// and the parent component's vertical span.
+fn piece_between(
+    ink: &[bool],
+    stride: usize,
+    component: &Component,
+    start: usize,
+    end: usize,
+) -> Option<Component> {
+    let mut min_x = usize::MAX;
+    let mut min_y = usize::MAX;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
+    let mut area = 0usize;
+    for cy in component.y..component.y + component.height {
+        let row = cy * stride;
+        for cx in start..end {
+            if ink[row + cx] {
+                min_x = min_x.min(cx);
+                min_y = min_y.min(cy);
+                max_x = max_x.max(cx);
+                max_y = max_y.max(cy);
+                area += 1;
+            }
+        }
+    }
+    if area == 0 {
+        return None;
+    }
+    Some(Component {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+        area,
+    })
+}
+
 fn build_templates(font: &fontdue::Font, sizes: &[f32]) -> Vec<Template> {
     let mut templates = Vec::new();
     let characters: Vec<char> =
@@ -355,13 +566,20 @@ fn build_templates(font: &fontdue::Font, sizes: &[f32]) -> Vec<Template> {
             templates.push(Template {
                 character: *character,
                 mask: grid,
+                aspect: metrics.width as f32 / metrics.height.max(1) as f32,
+                height_ratio: metrics.height as f32 / size.max(1.0),
             });
         }
     }
     templates
 }
 
-fn match_template(mask: &[bool], templates: &[Template]) -> (char, f32) {
+fn match_template(
+    mask: &[bool],
+    templates: &[Template],
+    aspect: f32,
+    height_ratio: f32,
+) -> (char, f32) {
     let mut best = ('?', 0.0f32);
     for template in templates {
         let mut intersection = 0usize;
@@ -374,11 +592,16 @@ fn match_template(mask: &[bool], templates: &[Template]) -> (char, f32) {
                 intersection += 1;
             }
         }
-        let score = if union == 0 {
+        let iou = if union == 0 {
             0.0
         } else {
             intersection as f32 / union as f32
         };
+        // Normalised bitmaps make uppercase/lowercase twins (S/s, U/u) look
+        // alike; their real glyph aspect ratios differ, so penalise mismatches.
+        let ratio = (aspect / template.aspect.max(0.01)).ln().abs();
+        let height_delta = (height_ratio / template.height_ratio.max(0.01)).ln().abs();
+        let score = iou * (1.0 - (ratio * 0.35).min(0.5)) * (1.0 - (height_delta * 0.6).min(0.7));
         if score > best.1 {
             best = (template.character, score);
         }

@@ -38,8 +38,9 @@ Phase 5 (tool integration) landed in the REST and MCP layers. In the main
   verification, and compare artifacts); `tests/api_tests.rs` asserts the tool
   names. The later `tests/vision_depth_tests.rs` and
   `tests/vision_depth_api_tests.rs` cover OCR, the locator registry and
-  `vision_act` over REST and MCP; the combined vision regression is 36 tests,
-  0 failed.
+  `vision_act` over REST and MCP (7 and 6 tests respectively). Rendering/vision
+  regressions total 42 tests (21 rendering + 8 vision API + 6 vision core +
+  7 vision MCP); 0 failed.
 - **Docs:** [PROTOCOLS.md](PROTOCOLS.md), [STATUS.md](STATUS.md),
   [ROADMAP.md](ROADMAP.md) and [README.md](../README.md) describe the shipped
   surface. The original tool table below is the design draft: delivered
@@ -58,9 +59,15 @@ element locator and the composite `vision_act` tool.
   unknown name is a 400); `vision_extract_text` always returns
   `ocr: [{text, rect, confidence, source:"ocr"}]` (empty with `none`). Glyph
   OCR is **bounded**: a fixed per-tile pixel budget (256x192 default), 12 px
-  tile overlap, a 64-tile cap, then an ordered merge with dedup. It targets
-  clean, opaque text at moderate/large sizes; DOM text stays exact via the
-  layout index. There are no model weights, GPU or VLM: the bounded-working-
+  tile overlap, a 64-tile cap, then reading-order merging with dedup and
+  aspect-/height-ratio case discrimination. Before the size filter, wide
+  connected components are split into per-character pieces using vertical ink
+  projections and valley/waist detection, so tightly spaced or touching glyphs
+  (e.g. `GO`) are read as separate letters; a genuine deep valley is required,
+  so single wide glyphs such as `W` are not over-split; shallow-waist and
+  balanced-mass fallbacks apply only to very wide components. It targets clean, opaque text at
+  moderate/large sizes; DOM text stays exact via the layout index. There are no
+  model weights, GPU or VLM: the bounded-working-
   set / tiling / ordered-merge *concepts* are borrowed from
   baidu/Unlimited-OCR, not its model or code.
 - **Pluggable locator (shipped):** `ElementLocator` in
@@ -352,8 +359,12 @@ W3/W4 can start against stub `VisualIndex` APIs once W1/W2 signatures are agreed
 
 - Full deep-learning object detection or hosted vision-model calls (pluggable trait only).
 - Real-time video/scrolling capture; vision operates on discrete screenshots.
-- Pixel-perfect OCR of anti-aliased or very small canvas text; the shipped glyph backend is
-  bounded and template-based.
+- Pixel-perfect OCR: the shipped glyph backend is bounded and template-based
+  (16x16 glyph masks). Anti-aliased or very small text may be missed, extreme
+  overlap with no valley/waist (e.g. ~0.8x advance) can still be rejected, and
+  exotic fonts or descender-heavy lowercase text remain limited by the template
+  matcher. OCR covers painted/canvas text only; DOM text is handled exactly by
+  the layout index.
 - Modifying the paint pipeline to retain glyph raster metadata.
 
 ## Definition of done
